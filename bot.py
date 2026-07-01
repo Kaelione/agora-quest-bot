@@ -6,6 +6,21 @@ from datetime import datetime
 import random
 from flask import Flask
 import threading
+import sqlite3
+conn = sqlite3.connect("points.db")
+c = conn.cursor()
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    points INTEGER DEFAULT 0,
+    daily INTEGER DEFAULT 0,
+    date TEXT
+)
+""")
+
+conn.commit()
+
 app = Flask(__name__)
 
 @app.route('/')
@@ -32,48 +47,40 @@ POINTS_FILE = "points.json"
 DAILY_LIMIT = 50
 
 
-def load_points():
-    if os.path.exists(POINTS_FILE):
-        try:
-            with open(POINTS_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-
-def save_points(data):
-    with open(POINTS_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-
-points = load_points()
-
-
 def add_points(user_id, amount):
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if user_id not in points:
-        points[user_id] = {
-            "points": 0,
-            "daily": 0,
-            "date": today
-        }
+    c.execute("SELECT points, daily, date FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
 
-    if points[user_id]["date"] != today:
-        points[user_id]["daily"] = 0
-        points[user_id]["date"] = today
+    if row is None:
+        points, daily, date = 0, 0, today
+        c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user_id, 0, 0, today))
+    else:
+        points, daily, date = row
 
-    if points[user_id]["daily"] >= DAILY_LIMIT:
+    if date != today:
+        daily = 0
+        date = today
+
+    if daily >= DAILY_LIMIT:
+        conn.commit()
         return 0
 
-    if points[user_id]["daily"] + amount > DAILY_LIMIT:
-        amount = DAILY_LIMIT - points[user_id]["daily"]
+    if daily + amount > DAILY_LIMIT:
+        amount = DAILY_LIMIT - daily
 
-    points[user_id]["points"] += amount
-    points[user_id]["daily"] += amount
+    points += amount
+    daily += amount
 
-    save_points(points)
+    c.execute("""
+        UPDATE users
+        SET points = ?, daily = ?, date = ?
+        WHERE user_id = ?
+    """, (points, daily, date, user_id))
+
+    conn.commit()
+
     return amount
 
 
@@ -92,21 +99,24 @@ async def score(ctx):
     user_id = str(ctx.author.id)
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if user_id not in points:
-        points[user_id] = {
-            "points": 0,
-            "daily": 0,
-            "date": today
-        }
+    c.execute("SELECT points, daily, date FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+
+    if row is None:
+        points, daily = 0, 0
+        c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user_id, 0, 0, today))
+        conn.commit()
     else:
-        if points[user_id]["date"] != today:
-            points[user_id]["daily"] = 0
-            points[user_id]["date"] = today
+        points, daily, date = row
+        if date != today:
+            daily = 0
+            c.execute("UPDATE users SET daily = ?, date = ? WHERE user_id = ?", (0, today, user_id))
+            conn.commit()
 
     await ctx.send(
         f"🏆 {ctx.author.name}\n"
-        f"Points totaux : {points[user_id]['points']}\n"
-        f"Points aujourd'hui : {points[user_id]['daily']}/50"
+        f"Points totaux : {points}\n"
+        f"Points aujourd'hui : {daily}/{DAILY_LIMIT}"
     )
 
 @bot.command()
