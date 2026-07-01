@@ -34,14 +34,17 @@ DAILY_LIMIT = 50
 
 def load_points():
     if os.path.exists(POINTS_FILE):
-        with open(POINTS_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(POINTS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
     return {}
 
 
 def save_points(data):
     with open(POINTS_FILE, "w") as f:
-        json.dump(data, f)
+        json.dump(data, f, indent=4)
 
 
 points = load_points()
