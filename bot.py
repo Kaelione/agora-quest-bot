@@ -37,7 +37,7 @@ questions = [
     A) Oui
     B) ça dépend de qui est loup avec nous
     C) Non
-    D) ça dépend de qui est dans la game""", "a": "4"},
+    D) ça dépend de qui est dans la game""", "a": "A"},
     {"q": """Quel est la meilleure catégorie de role pour une réflexion totale ?
     A) les roles a info
     B) les roles de protection
