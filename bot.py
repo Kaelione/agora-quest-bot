@@ -332,9 +332,9 @@ async def on_ready():
     await bot.tree.sync()
     print(f"{bot.user} est connecté et en ligne !")
 
-@bot.tree.command(name="ping", description="Vérifie si le bot est en ligne")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("🏓 Pong !")
+@bot.command()
+async def ping(ctx):
+    await ctx.send("🏓 Pong !")
 
 @bot.tree.command(name="score", description="Affiche tes points et ta progression du jour")
 async def score(interaction: discord.Interaction):
@@ -454,8 +454,8 @@ async def on_message(message):
 
     user_id = message.author.id
 
-    # Si l'utilisateur est en mode chat, tout message texte est envoyé à l'IA
-    if user_id in active_chats:
+    # Si l'utilisateur est en mode chat et que ce n'est pas une commande (!ping)
+    if user_id in active_chats and not message.content.startswith("!"):
         active_chats[user_id].append({"role": "user", "content": message.content})
         async with message.channel.typing():
             try:
@@ -465,6 +465,8 @@ async def on_message(message):
             except Exception as e:
                 await message.channel.send("⚠️ Erreur avec l'IA, réessaie dans un instant.")
                 print(f"Erreur Groq: {e}")
+
+    await bot.process_commands(message)
 
 @bot.tree.command(name="classement", description="Affiche le classement du serveur (points et streak)")
 async def classement(interaction: discord.Interaction):
