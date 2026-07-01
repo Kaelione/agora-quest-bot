@@ -373,4 +373,38 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+@bot.command()
+async def classement(ctx):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, points FROM users WHERE points > 0 ORDER BY points DESC LIMIT 10")
+        top_points = cur.fetchall()
+        cur.execute("SELECT user_id, streak FROM users WHERE streak > 0 ORDER BY streak DESC LIMIT 10")
+        top_streak = cur.fetchall()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    medals = ["🥇", "🥈", "🥉"]
+
+    async def format_leaderboard(rows, label, emoji, suffix):
+        if not rows:
+            return f"{emoji} **{label}**\nPersonne pour l'instant."
+        lines = [f"{emoji} **{label}**"]
+        for i, (user_id, value) in enumerate(rows):
+            try:
+                user = await bot.fetch_user(int(user_id))
+                name = user.name
+            except Exception:
+                name = f"Utilisateur {user_id}"
+            rank = medals[i] if i < 3 else f"{i + 1}."
+            lines.append(f"{rank} {name} — {value} {suffix}")
+        return "\n".join(lines)
+
+    points_text = await format_leaderboard(top_points, "Classement Points", "🏆", "pts")
+    streak_text = await format_leaderboard(top_streak, "Classement Streak", "🔥", "jour(s)")
+
+    await ctx.send(f"{points_text}\n\n{streak_text}")
+
 bot.run(os.getenv("TOKEN"))
