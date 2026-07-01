@@ -4,6 +4,19 @@ import json
 import os
 from datetime import datetime
 import random
+from flask import Flask
+import threading
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive"
+
+def run_web():
+    app.run(host="0.0.0.0", port=10000)
+
+threading.Thread(target=run_web).start()
+
 questions = [
     {"q": "Combien font 2 + 2 ?", "a": "4"},
     {"q": "Quel est le contraire de jour ?", "a": "nuit"},
@@ -74,9 +87,18 @@ async def ping(ctx):
 @bot.command()
 async def score(ctx):
     user_id = str(ctx.author.id)
+    today = datetime.now().strftime("%Y-%m-%d")
 
     if user_id not in points:
-        points[user_id] = {"points": 0, "daily": 0, "date": ""}
+        points[user_id] = {
+            "points": 0,
+            "daily": 0,
+            "date": today
+        }
+    else:
+        if points[user_id]["date"] != today:
+            points[user_id]["daily"] = 0
+            points[user_id]["date"] = today
 
     await ctx.send(
         f"🏆 {ctx.author.name}\n"
@@ -105,5 +127,4 @@ async def defi(ctx):
     except:
         await ctx.send("⏰ Trop lent !")
 
-
-bot.run("Met_ton_token_ici")
+bot.run(os.getenv("TOKEN"))
