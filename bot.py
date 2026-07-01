@@ -33,9 +33,21 @@ def run_web():
 threading.Thread(target=run_web).start()
 
 questions = [
-    {"q": "Combien font 2 + 2 ?", "a": "4"},
-    {"q": "Quel est le contraire de jour ?", "a": "nuit"},
-    {"q": "Combien de lettres dans 'loup' ?", "a": "4"}
+    {"q": "Est ce une bonne idée de disso?
+    A) Oui
+    B) ça dépend de qui est loup avec nous
+    C) Non
+    D) ça dépend de qui est dans la game", "a": "4"},
+    {"q": "Quel est la meilleur catégorie de role pour une réflexion totale ?
+    A) les roles a info
+    B) les roles de protection
+    C) les roles passifs
+    D) les loups", "a": "C"},
+    {"q": "C'est quoi des gp complémentaire ?
+    A) deux gp qui s'opposent mais ensemble avance bien
+    B) deux gp qui se ressemblent et avance bien ensemble
+    C) deux gp très différents qui se gêne l'un l'autre
+    D) deux gp qui sont exactement les meme sans impact sur l'autre", "a": "A"}
 ]
 
 intents = discord.Intents.default()
