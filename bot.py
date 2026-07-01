@@ -38,7 +38,7 @@ questions = [
     B) ça dépend de qui est loup avec nous
     C) Non
     D) ça dépend de qui est dans la game""", 
-     "a": "A"},
+     "a": "D"},
     {"q": """Quel est la meilleure catégorie de role pour une réflexion totale ?
     A) les roles a info
     B) les roles de protection
@@ -145,7 +145,7 @@ async def defi(ctx):
     try:
         msg = await bot.wait_for("message", check=check, timeout=15)
 
-        if msg.content.lower() == question["a"]:
+       if msg.content.strip().lower() == question["a"].strip().lower():
             gained = add_points(str(ctx.author.id), 2)
             await ctx.send(f"✅ Bonne réponse ! +{gained} points 🏆")
         else:
