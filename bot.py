@@ -33,21 +33,21 @@ def run_web():
 threading.Thread(target=run_web).start()
 
 questions = [
-    {"q": "Est ce une bonne idée de disso?
+    {"q": """Est ce une bonne idée de disso?
     A) Oui
     B) ça dépend de qui est loup avec nous
     C) Non
-    D) ça dépend de qui est dans la game", "a": "4"},
-    {"q": "Quel est la meilleur catégorie de role pour une réflexion totale ?
+    D) ça dépend de qui est dans la game""", "a": "4"},
+    {"q": """Quel est la meilleure catégorie de role pour une réflexion totale ?
     A) les roles a info
     B) les roles de protection
     C) les roles passifs
-    D) les loups", "a": "C"},
-    {"q": "C'est quoi des gp complémentaire ?
+    D) les loups""", "a": "C"},
+    {"q": """C'est quoi des gp complémentaire ?
     A) deux gp qui s'opposent mais ensemble avance bien
     B) deux gp qui se ressemblent et avance bien ensemble
     C) deux gp très différents qui se gêne l'un l'autre
-    D) deux gp qui sont exactement les meme sans impact sur l'autre", "a": "A"}
+    D) deux gp qui sont exactement les meme sans impact sur l'autre""", "a": "A"}
 ]
 
 intents = discord.Intents.default()
@@ -55,7 +55,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-POINTS_FILE = "points.json"
 DAILY_LIMIT = 50
 
 
