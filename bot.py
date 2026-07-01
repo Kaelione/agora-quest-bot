@@ -145,7 +145,7 @@ async def defi(ctx):
     try:
         msg = await bot.wait_for("message", check=check, timeout=15)
 
-       if msg.content.strip().lower() == question["a"].strip().lower():
+        if msg.content.strip().lower() == question["a"].strip().lower():
             gained = add_points(str(ctx.author.id), 2)
             await ctx.send(f"✅ Bonne réponse ! +{gained} points 🏆")
         else:
