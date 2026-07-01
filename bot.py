@@ -7,6 +7,34 @@ from flask import Flask
 import threading
 import psycopg2
 from psycopg2 import pool
+import requests
+
+# =========================================================
+# IA (Groq - gratuit, sans carte bancaire)
+# =========================================================
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+def ask_groq(messages):
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": GROQ_MODEL,
+            "messages": messages,
+            "max_tokens": 500
+        },
+        timeout=30
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
+# Stocke les conversations actives : {user_id: [liste de messages]}
+active_chats = {}
 
 # =========================================================
 # BASE DE DONNÉES (Postgres via Supabase - persistante)
@@ -300,5 +328,49 @@ async def streak(ctx):
         f"Streak actuel : {current_streak} jour(s)\n"
         f"Prochain palier ({next_milestone} jours) dans {remaining} jour(s) — récompense : +{STREAK_BONUS} points"
     )
+
+@bot.command()
+async def chat(ctx):
+    user_id = ctx.author.id
+    active_chats[user_id] = [
+        {
+            "role": "system",
+            "content": (
+                "Tu es un assistant sympa et détendu qui discute sur un serveur Discord. "
+                "Réponds de façon naturelle, concise (pas de pavé), et dans la même langue que l'utilisateur."
+            )
+        }
+    ]
+    await ctx.send("💬 Mode conversation activé ! Écris-moi ce que tu veux, je te réponds. Tape `!stopchat` pour arrêter.")
+
+@bot.command()
+async def stopchat(ctx):
+    user_id = ctx.author.id
+    if user_id in active_chats:
+        del active_chats[user_id]
+        await ctx.send("👋 Conversation terminée !")
+    else:
+        await ctx.send("Tu n'as pas de conversation active.")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    user_id = message.author.id
+
+    # Si l'utilisateur est en mode chat et que ce n'est pas une commande
+    if user_id in active_chats and not message.content.startswith("!"):
+        active_chats[user_id].append({"role": "user", "content": message.content})
+        async with message.channel.typing():
+            try:
+                reply = ask_groq(active_chats[user_id])
+                active_chats[user_id].append({"role": "assistant", "content": reply})
+                await message.channel.send(reply[:2000])  # limite Discord = 2000 caractères
+            except Exception as e:
+                await message.channel.send("⚠️ Erreur avec l'IA, réessaie dans un instant.")
+                print(f"Erreur Groq: {e}")
+
+    await bot.process_commands(message)
 
 bot.run(os.getenv("TOKEN"))
