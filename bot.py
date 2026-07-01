@@ -97,19 +97,37 @@ questions = [
     B) ça dépend de qui est loup avec nous
     C) Non
     D) ça dépend de qui est dans la game""",
-     "a": "D"},
+     "a": "D", "difficulty": "moyen", "points": 2},
     {"q": """Quel est la meilleure catégorie de role pour une réflexion totale ?
     A) les roles a info
     B) les roles de protection
     C) les roles passifs
     D) les loups""",
-     "a": "C"},
+     "a": "C", "difficulty": "difficile", "points": 3},
     {"q": """C'est quoi des gp complémentaire ?
     A) deux gp qui s'opposent mais ensemble avance bien
     B) deux gp qui se ressemblent et avance bien ensemble
     C) deux gp très différents qui se gêne l'un l'autre
     D) deux gp qui sont exactement les meme sans impact sur l'autre""",
-     "a": "A"}
+     "a": "A", "difficulty": "facile", "points": 1},
+    {"q": """Dans la technique du "2 safes 1 loup" au tour décisif (TD), combien de joueurs de chaque camp restent en jeu ?
+    A) 1 safe et 1 loup
+    B) 2 safes et 1 loup
+    C) 2 loups et 1 safe
+    D) 3 safes""",
+     "a": "B", "difficulty": "facile", "points": 1},
+    {"q": """Pourquoi le maire doit-il laisser le vote temporairement en égalité pendant le tour décisif ?
+    A) Pour perdre du temps sans raison
+    B) Pour gagner du temps, se placer au centre de l'action et mettre le loup dans une situation critique
+    C) Pour éviter d'avoir à voter
+    D) Pour laisser le safe décider à sa place""",
+     "a": "B", "difficulty": "moyen", "points": 2},
+    {"q": """Pourquoi le maire doit-il tuer immédiatement après avoir utilisé la phrase clé ("oui merci, j'ai win"), plutôt que d'attendre ?
+    A) Parce que reporter le choix laisse le loup se recalibrer, alors que tuer immédiatement exploite sa réaction spontanée
+    B) Parce que c'est une règle du jeu obligatoire
+    C) Parce que les autres joueurs préfèrent que ça aille vite
+    D) Parce que le loup l'exige""",
+     "a": "A", "difficulty": "difficile", "points": 3}
 ]
 
 # =========================================================
@@ -273,7 +291,7 @@ async def score(ctx):
 @bot.command()
 async def defi(ctx):
     question = random.choice(questions)
-    await ctx.send("🧠 Défi : " + question["q"])
+    await ctx.send(f"🧠 Défi [{question['difficulty'].capitalize()} — {question['points']} pt(s)] : " + question["q"])
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
@@ -282,7 +300,7 @@ async def defi(ctx):
         msg = await bot.wait_for("message", check=check, timeout=15)
         if msg.content.strip().lower() == question["a"].strip().lower():
             user_id = str(ctx.author.id)
-            gained = add_points(user_id, 2)
+            gained = add_points(user_id, question["points"])
             streak, bonus = update_streak(user_id)
 
             reply = f"✅ Bonne réponse ! +{gained} points 🏆\n🔥 Streak : {streak} jour(s) d'affilée"
