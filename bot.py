@@ -2,8 +2,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import os
-from datetime import datetime
-import random
+import json
+from datetime import datetime, timedelta
 from flask import Flask
 import threading
 import psycopg2
@@ -36,6 +36,118 @@ def ask_groq(messages):
 
 # Stocke les conversations actives : {user_id: [liste de messages]}
 active_chats = {}
+
+DIFFICULTY_POINTS = {"facile": 1, "moyen": 2, "difficile": 3}
+
+def generate_questions_from_text(source_text, source_label=""):
+    """Demande à Groq de générer des questions QCM à partir d'un texte, retourne une liste de dicts."""
+    system_prompt = (
+        "Tu es un générateur de questions de quiz pour un serveur Discord Loup-Garou (jeu de rôles/stratégie). "
+        "À partir du texte fourni, génère entre 1 et 3 questions à choix multiples (QCM) pertinentes, "
+        "qui testent la compréhension du contenu. "
+        "Réponds STRICTEMENT avec un tableau JSON, sans texte autour, sans balises markdown, au format exact :\n"
+        '[{"q": "texte de la question", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
+        '"a": "A", "difficulty": "facile"}]\n'
+        'Le champ "a" doit être la lettre de la bonne réponse. '
+        'Le champ "difficulty" doit être "facile", "moyen" ou "difficile" selon la complexité de la question.'
+    )
+
+    try:
+        raw = ask_groq([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": source_text[:4000]}
+        ])
+        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(cleaned)
+    except Exception as e:
+        print(f"Erreur génération questions ({source_label}): {e}")
+        return []
+
+    results = []
+    for item in parsed:
+        try:
+            difficulty = item.get("difficulty", "moyen").lower()
+            if difficulty not in DIFFICULTY_POINTS:
+                difficulty = "moyen"
+            results.append({
+                "q": item["q"],
+                "options": item["options"],
+                "a": item["a"].upper(),
+                "difficulty": difficulty,
+                "points": DIFFICULTY_POINTS[difficulty]
+            })
+        except (KeyError, AttributeError):
+            continue
+
+    return results
+
+def save_questions_to_db(question_list, source=""):
+    """Enregistre une liste de questions générées dans la banque, en ignorant les doublons."""
+    saved = 0
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for q in question_list:
+            try:
+                opts = q["options"]
+                cur.execute(
+                    "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points, source) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
+                    (q["q"], opts["A"], opts["B"], opts["C"], opts["D"], q["a"], q["difficulty"], q["points"], source)
+                )
+                if cur.rowcount > 0:
+                    saved += 1
+            except Exception as e:
+                print(f"Erreur sauvegarde question: {e}")
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+    return saved
+
+async def generate_questions_from_forum(forum_channel, limit=10):
+    """Parcourt les threads d'un forum, génère des questions via IA pour les threads pas encore traités."""
+    total_saved = 0
+    threads_scanned = 0
+
+    all_threads = list(forum_channel.threads)
+    try:
+        async for archived in forum_channel.archived_threads(limit=limit):
+            all_threads.append(archived)
+    except Exception:
+        pass
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for thread in all_threads[:limit]:
+            thread_id = str(thread.id)
+            cur.execute("SELECT 1 FROM processed_threads WHERE thread_id = %s", (thread_id,))
+            if cur.fetchone() is not None:
+                continue  # déjà traité
+
+            try:
+                starter = thread.starter_message or await thread.fetch_message(thread.id)
+                content = f"{thread.name}\n\n{starter.content}"
+            except Exception:
+                content = thread.name
+
+            if len(content.strip()) < 30:
+                cur.execute("INSERT INTO processed_threads (thread_id) VALUES (%s) ON CONFLICT DO NOTHING", (thread_id,))
+                conn.commit()
+                continue
+
+            new_questions = generate_questions_from_text(content, source_label=thread.name)
+            total_saved += save_questions_to_db(new_questions, source=thread.name)
+            threads_scanned += 1
+
+            cur.execute("INSERT INTO processed_threads (thread_id) VALUES (%s) ON CONFLICT DO NOTHING", (thread_id,))
+            conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    return threads_scanned, total_saved
 
 # =========================================================
 # BASE DE DONNÉES (Postgres via Supabase - persistante)
@@ -72,12 +184,53 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_streak INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_month_points INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS monthly_top1_count INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS battle_cooldown_until TEXT")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS loser_until TEXT")
         # Rattrape best_streak pour les joueurs qui avaient déjà une streak en cours
         # avant l'ajout de cette colonne
         cur.execute("UPDATE users SET best_streak = streak WHERE best_streak = 0 AND streak > 0")
         # Récupère l'historique existant : comme aucun reset n'a encore eu lieu,
         # "points" représente déjà le total depuis le début pour l'instant.
         cur.execute("UPDATE users SET total_points = points WHERE total_points = 0 AND points > 0")
+
+        # Banque de questions (remplace la liste codée en dur, alimentée aussi par l'IA)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                id SERIAL PRIMARY KEY,
+                q TEXT UNIQUE NOT NULL,
+                option_a TEXT NOT NULL,
+                option_b TEXT NOT NULL,
+                option_c TEXT NOT NULL,
+                option_d TEXT NOT NULL,
+                correct TEXT NOT NULL,
+                difficulty TEXT NOT NULL,
+                points INTEGER NOT NULL,
+                source TEXT
+            )
+        """)
+
+        # Threads du forum déjà utilisés pour générer des questions (évite les doublons)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_threads (
+                thread_id TEXT PRIMARY KEY
+            )
+        """)
+
+        # Questions de départ (migrées une seule fois, ensuite tout vit en base)
+        seed_questions = [
+            ("Est ce une bonne idée de disso ?", "Oui", "ça dépend de qui est loup avec nous", "Non", "ça dépend de qui est dans la game", "D", "moyen", 2),
+            ("Quel est la meilleure catégorie de role pour une réflexion totale ?", "les roles a info", "les roles de protection", "les roles passifs", "les loups", "C", "difficile", 3),
+            ("C'est quoi des gp complémentaires ?", "deux gp qui s'opposent mais ensemble avancent bien", "deux gp qui se ressemblent et avancent bien ensemble", "deux gp très différents qui se gênent l'un l'autre", "deux gp qui sont exactement les mêmes, sans impact sur l'autre", "A", "facile", 1),
+            ("Dans la technique du \"2 safes 1 loup\" au tour décisif (TD), combien de joueurs de chaque camp restent en jeu ?", "1 safe et 1 loup", "2 safes et 1 loup", "2 loups et 1 safe", "3 safes", "B", "facile", 1),
+            ("Pourquoi le maire doit-il laisser le vote temporairement en égalité pendant le tour décisif ?", "Pour perdre du temps sans raison", "Pour gagner du temps, se placer au centre de l'action et mettre le loup dans une situation critique", "Pour éviter d'avoir à voter", "Pour laisser le safe décider à sa place", "B", "moyen", 2),
+            ("Pourquoi le maire doit-il tuer immédiatement après avoir utilisé la phrase clé (\"oui merci, j'ai win\") ?", "Parce que reporter le choix laisse le loup se recalibrer, alors que tuer immédiatement exploite sa réaction spontanée", "Parce que c'est une règle du jeu obligatoire", "Parce que les autres joueurs préfèrent que ça aille vite", "Parce que le loup l'exige", "A", "difficile", 3),
+        ]
+        for q, a, b, c, d, correct, difficulty, points in seed_questions:
+            cur.execute(
+                "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
+                (q, a, b, c, d, correct, difficulty, points)
+            )
 
         # Table pour suivre les infos système (comme le dernier reset mensuel)
         cur.execute("""
@@ -117,68 +270,49 @@ threading.Thread(target=run_web).start()
 # =========================================================
 # QUIZ
 # =========================================================
-questions = [
-    {
-        "q": "Est ce une bonne idée de disso ?",
-        "options": {
-            "A": "Oui",
-            "B": "ça dépend de qui est loup avec nous",
-            "C": "Non",
-            "D": "ça dépend de qui est dans la game"
-        },
-        "a": "D", "difficulty": "moyen", "points": 2
-    },
-    {
-        "q": "Quel est la meilleure catégorie de role pour une réflexion totale ?",
-        "options": {
-            "A": "les roles a info",
-            "B": "les roles de protection",
-            "C": "les roles passifs",
-            "D": "les loups"
-        },
-        "a": "C", "difficulty": "difficile", "points": 3
-    },
-    {
-        "q": "C'est quoi des gp complémentaires ?",
-        "options": {
-            "A": "deux gp qui s'opposent mais ensemble avancent bien",
-            "B": "deux gp qui se ressemblent et avancent bien ensemble",
-            "C": "deux gp très différents qui se gênent l'un l'autre",
-            "D": "deux gp qui sont exactement les mêmes, sans impact sur l'autre"
-        },
-        "a": "A", "difficulty": "facile", "points": 1
-    },
-    {
-        "q": "Dans la technique du \"2 safes 1 loup\" au tour décisif (TD), combien de joueurs de chaque camp restent en jeu ?",
-        "options": {
-            "A": "1 safe et 1 loup",
-            "B": "2 safes et 1 loup",
-            "C": "2 loups et 1 safe",
-            "D": "3 safes"
-        },
-        "a": "B", "difficulty": "facile", "points": 1
-    },
-    {
-        "q": "Pourquoi le maire doit-il laisser le vote temporairement en égalité pendant le tour décisif ?",
-        "options": {
-            "A": "Pour perdre du temps sans raison",
-            "B": "Pour gagner du temps, se placer au centre de l'action et mettre le loup dans une situation critique",
-            "C": "Pour éviter d'avoir à voter",
-            "D": "Pour laisser le safe décider à sa place"
-        },
-        "a": "B", "difficulty": "moyen", "points": 2
-    },
-    {
-        "q": "Pourquoi le maire doit-il tuer immédiatement après avoir utilisé la phrase clé (\"oui merci, j'ai win\") ?",
-        "options": {
-            "A": "Parce que reporter le choix laisse le loup se recalibrer, alors que tuer immédiatement exploite sa réaction spontanée",
-            "B": "Parce que c'est une règle du jeu obligatoire",
-            "C": "Parce que les autres joueurs préfèrent que ça aille vite",
-            "D": "Parce que le loup l'exige"
-        },
-        "a": "A", "difficulty": "difficile", "points": 3
+# =========================================================
+# QUIZ - les questions vivent maintenant en base (table "questions")
+# =========================================================
+def get_random_question(exclude_texts=None):
+    """Pioche une question aléatoire dans la banque, en évitant si possible celles déjà utilisées."""
+    exclude_texts = exclude_texts or []
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        if exclude_texts:
+            cur.execute(
+                "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
+                "FROM questions WHERE q != ALL(%s) ORDER BY RANDOM() LIMIT 1",
+                (exclude_texts,)
+            )
+            row = cur.fetchone()
+            if row is None:  # plus de questions inédites, on retire la contrainte
+                cur.execute(
+                    "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
+                    "FROM questions ORDER BY RANDOM() LIMIT 1"
+                )
+                row = cur.fetchone()
+        else:
+            cur.execute(
+                "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
+                "FROM questions ORDER BY RANDOM() LIMIT 1"
+            )
+            row = cur.fetchone()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if row is None:
+        return None
+
+    q, a, b, c, d, correct, difficulty, points = row
+    return {
+        "q": q,
+        "options": {"A": a, "B": b, "C": c, "D": d},
+        "a": correct,
+        "difficulty": difficulty,
+        "points": points
     }
-]
 
 # =========================================================
 # BOT DISCORD
@@ -188,6 +322,58 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 DAILY_LIMIT = 50
+
+# Suivi des joueurs actuellement en plein duel (empêche les doublons de duel)
+battle_active_users = set()
+
+def get_battle_cooldown(user_id):
+    """Retourne la date/heure jusqu'à laquelle le joueur ne peut pas relancer de duel (ou None)."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT battle_cooldown_until FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        release_conn(conn)
+    if row is None or row[0] is None:
+        return None
+    try:
+        return datetime.fromisoformat(row[0])
+    except Exception:
+        return None
+
+def set_battle_penalty(user_id, until_dt):
+    """Enregistre le cooldown et la fin du rôle Loser pour un joueur."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+        exists = cur.fetchone()
+        if exists:
+            cur.execute(
+                "UPDATE users SET battle_cooldown_until = %s, loser_until = %s WHERE user_id = %s",
+                (until_dt.isoformat(), until_dt.isoformat(), user_id)
+            )
+        else:
+            cur.execute(
+                "INSERT INTO users (user_id, battle_cooldown_until, loser_until) VALUES (%s, %s, %s)",
+                (user_id, until_dt.isoformat(), until_dt.isoformat())
+            )
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+async def get_or_create_loser_role(guild):
+    role = discord.utils.get(guild.roles, name="Loser")
+    if role is None:
+        role = await guild.create_role(
+            name="Loser",
+            color=discord.Color.dark_gray(),
+            reason="Rôle créé automatiquement pour /battle"
+        )
+    return role
 
 def add_points(user_id, amount):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -317,7 +503,7 @@ def update_streak(user_id):
 
 class QuizView(discord.ui.View):
     def __init__(self, question, author_id):
-        super().__init__(timeout=20)
+        super().__init__(timeout=30)
         self.question = question
         self.author_id = author_id
         self.answered = False
@@ -374,6 +560,121 @@ class QuizView(discord.ui.View):
         except Exception:
             pass
 
+class BattleChallengeView(discord.ui.View):
+    def __init__(self, challenger, opponent):
+        super().__init__(timeout=30)
+        self.challenger = challenger
+        self.opponent = opponent
+        self.result = None
+        self.message = None
+
+    @discord.ui.button(label="Accepter", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Ce duel ne te concerne pas !", ephemeral=True)
+            return
+        self.result = "accepted"
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ {self.opponent.mention} a accepté le duel ! Début du combat...", view=self
+        )
+        self.stop()
+
+    @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Ce duel ne te concerne pas !", ephemeral=True)
+            return
+        self.result = "declined"
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"❌ {self.opponent.mention} a refusé le duel.", view=self
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        if self.result is None and self.message is not None:
+            for child in self.children:
+                child.disabled = True
+            try:
+                await self.message.edit(content="⏰ Le duel a expiré, pas de réponse.", view=self)
+            except Exception:
+                pass
+
+class BattleRoundView(discord.ui.View):
+    def __init__(self, question, player1_id, player2_id):
+        super().__init__(timeout=15)
+        self.question = question
+        self.player1_id = player1_id
+        self.player2_id = player2_id
+        self.winner_id = None
+        self.finished = False
+        self.answered_users = set()
+        self.message = None
+
+        for letter in ["A", "B", "C", "D"]:
+            if letter in question["options"]:
+                button = discord.ui.Button(label=letter, style=discord.ButtonStyle.primary)
+                button.callback = self.make_callback(letter)
+                self.add_item(button)
+
+    def make_callback(self, letter):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id not in (self.player1_id, self.player2_id):
+                await interaction.response.send_message("Ce duel ne te concerne pas !", ephemeral=True)
+                return
+            if self.finished:
+                await interaction.response.defer()
+                return
+            if interaction.user.id in self.answered_users:
+                await interaction.response.send_message("Tu as déjà répondu à cette question !", ephemeral=True)
+                return
+
+            self.answered_users.add(interaction.user.id)
+
+            if letter == self.question["a"]:
+                self.finished = True
+                self.winner_id = interaction.user.id
+                for child in self.children:
+                    child.disabled = True
+                embed = interaction.message.embeds[0]
+                embed.description += f"\n\n✅ <@{interaction.user.id}> a trouvé la bonne réponse en premier !"
+                embed.color = discord.Color.green()
+                await interaction.response.edit_message(embed=embed, view=self)
+                self.stop()
+            else:
+                await interaction.response.send_message("❌ Mauvaise réponse !", ephemeral=True)
+                if len(self.answered_users) >= 2:
+                    self.finished = True
+                    for child in self.children:
+                        child.disabled = True
+                    embed = interaction.message.embeds[0]
+                    embed.description += f"\n\n❌ Personne n'a trouvé la bonne réponse (**{self.question['a']}**)."
+                    embed.color = discord.Color.orange()
+                    try:
+                        await interaction.message.edit(embed=embed, view=self)
+                    except Exception:
+                        pass
+                    self.stop()
+        return callback
+
+    async def on_timeout(self):
+        if self.finished or self.message is None:
+            return
+        self.finished = True
+        for child in self.children:
+            child.disabled = True
+        try:
+            embed = self.message.embeds[0]
+            embed.description += "\n\n⏰ Personne n'a répondu à temps."
+            embed.color = discord.Color.orange()
+            await self.message.edit(embed=embed, view=self)
+        except Exception:
+            pass
+        self.stop()
+
 @tasks.loop(hours=6)
 async def check_monthly_reset():
     current_month = datetime.now().strftime("%Y-%m")
@@ -407,11 +708,68 @@ async def check_monthly_reset():
     finally:
         release_conn(conn)
 
+FORUM_CHANNEL_ID = os.getenv("FORUM_CHANNEL_ID")  # ID du salon forum "savoir", optionnel
+
+@tasks.loop(hours=12)
+async def auto_generate_questions():
+    if not FORUM_CHANNEL_ID:
+        return
+    try:
+        channel = bot.get_channel(int(FORUM_CHANNEL_ID)) or await bot.fetch_channel(int(FORUM_CHANNEL_ID))
+        if isinstance(channel, discord.ForumChannel):
+            scanned, saved = await generate_questions_from_forum(channel, limit=15)
+            if saved > 0:
+                print(f"🧠 Génération auto : {scanned} post(s) lus, {saved} nouvelle(s) question(s) ajoutée(s)")
+    except Exception as e:
+        print(f"Erreur génération auto: {e}")
+
+@tasks.loop(minutes=5)
+async def check_loser_roles():
+    now = datetime.now()
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, loser_until FROM users WHERE loser_until IS NOT NULL")
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    for user_id, loser_until_str in rows:
+        try:
+            loser_until = datetime.fromisoformat(loser_until_str)
+        except Exception:
+            continue
+
+        if loser_until <= now:
+            for guild in bot.guilds:
+                member = guild.get_member(int(user_id))
+                if member:
+                    role = discord.utils.get(guild.roles, name="Loser")
+                    if role and role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason="Fin de la sanction /battle")
+                        except Exception:
+                            pass
+
+            conn2 = get_conn()
+            try:
+                cur2 = conn2.cursor()
+                cur2.execute("UPDATE users SET loser_until = NULL WHERE user_id = %s", (user_id,))
+                conn2.commit()
+                cur2.close()
+            finally:
+                release_conn(conn2)
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     if not check_monthly_reset.is_running():
         check_monthly_reset.start()
+    if not auto_generate_questions.is_running():
+        auto_generate_questions.start()
+    if not check_loser_roles.is_running():
+        check_loser_roles.start()
     print(f"{bot.user} est connecté et en ligne !")
 
 @bot.command()
@@ -456,7 +814,10 @@ async def score(interaction: discord.Interaction):
 
 @bot.tree.command(name="defi", description="Répond à une question quiz du serveur")
 async def defi(interaction: discord.Interaction):
-    question = random.choice(questions)
+    question = get_random_question()
+    if question is None:
+        await interaction.response.send_message("⚠️ Aucune question disponible pour l'instant.", ephemeral=True)
+        return
 
     options_text = "\n".join(
         f"**{letter})** {text}" for letter, text in question["options"].items()
@@ -629,5 +990,116 @@ async def stat(interaction: discord.Interaction, membre: discord.Member = None):
     embed.add_field(name="🎭 Rôles", value=roles_str, inline=False)
 
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="generer_questions", description="Génère des questions à partir des posts d'un forum (IA)")
+@app_commands.describe(forum="Le salon forum à scanner (ex: savoir)", nombre="Nombre de posts max à analyser")
+async def generer_questions(interaction: discord.Interaction, forum: discord.ForumChannel, nombre: int = 10):
+    await interaction.response.defer()
+    scanned, saved = await generate_questions_from_forum(forum, limit=nombre)
+    await interaction.followup.send(
+        f"🧠 Analyse terminée : {scanned} post(s) lu(s), **{saved} nouvelle(s) question(s)** ajoutée(s) à la banque."
+    )
+
+@bot.tree.command(name="battle", description="Défie un autre joueur en duel de quiz (5 questions, best of 5)")
+@app_commands.describe(adversaire="Le joueur à défier")
+async def battle(interaction: discord.Interaction, adversaire: discord.Member):
+    challenger = interaction.user
+    opponent = adversaire
+
+    if opponent.id == challenger.id:
+        await interaction.response.send_message("Tu ne peux pas te défier toi-même !", ephemeral=True)
+        return
+    if opponent.bot:
+        await interaction.response.send_message("Tu ne peux pas défier un bot !", ephemeral=True)
+        return
+
+    now = datetime.now()
+    for user in (challenger, opponent):
+        cooldown = get_battle_cooldown(str(user.id))
+        if cooldown and cooldown > now:
+            remaining = int((cooldown - now).total_seconds() / 60) + 1
+            await interaction.response.send_message(
+                f"⏳ {user.mention} doit encore attendre {remaining} minute(s) avant de pouvoir se battre.",
+                ephemeral=True
+            )
+            return
+
+    if challenger.id in battle_active_users or opponent.id in battle_active_users:
+        await interaction.response.send_message("Un des deux joueurs est déjà en plein duel !", ephemeral=True)
+        return
+
+    battle_active_users.add(challenger.id)
+    battle_active_users.add(opponent.id)
+
+    try:
+        challenge_view = BattleChallengeView(challenger, opponent)
+        await interaction.response.send_message(
+            f"⚔️ {challenger.mention} défie {opponent.mention} en duel ! "
+            f"{opponent.mention}, accepte ou refuse ci-dessous (30s) :",
+            view=challenge_view
+        )
+        challenge_view.message = await interaction.original_response()
+        await challenge_view.wait()
+
+        if challenge_view.result != "accepted":
+            return
+
+        scores = {challenger.id: 0, opponent.id: 0}
+        used_questions = []
+
+        for round_num in range(1, 6):
+            question = get_random_question(exclude_texts=used_questions)
+            if question is None:
+                await interaction.followup.send("⚠️ Plus de questions disponibles pour continuer le duel.")
+                break
+            used_questions.append(question["q"])
+
+            options_text = "\n".join(f"**{l})** {t}" for l, t in question["options"].items())
+            embed = discord.Embed(
+                title=f"⚔️ Round {round_num}/5 — [{question['difficulty'].capitalize()}]",
+                description=(
+                    f"{question['q']}\n\n{options_text}\n\n"
+                    f"{challenger.mention} vs {opponent.mention} — le premier à trouver marque le point !"
+                ),
+                color=discord.Color.blurple()
+            )
+            round_view = BattleRoundView(question, challenger.id, opponent.id)
+            round_message = await interaction.followup.send(embed=embed, view=round_view)
+            round_view.message = round_message
+
+            await round_view.wait()
+
+            if round_view.winner_id:
+                scores[round_view.winner_id] += 1
+
+        p1_score = scores[challenger.id]
+        p2_score = scores[opponent.id]
+
+        if p1_score == p2_score:
+            await interaction.followup.send(f"🤝 Égalité parfaite ({p1_score}-{p2_score}) ! Pas de perdant cette fois.")
+        else:
+            winner = challenger if p1_score > p2_score else opponent
+            loser = opponent if winner.id == challenger.id else challenger
+
+            await interaction.followup.send(
+                f"🏆 {winner.mention} remporte le duel {max(p1_score, p2_score)}-{min(p1_score, p2_score)} !\n"
+                f"💀 {loser.mention} écope du rôle **Loser** pendant 1h et ne pourra pas relancer de duel avant 1h."
+            )
+
+            try:
+                loser_role = await get_or_create_loser_role(interaction.guild)
+                await loser.add_roles(loser_role, reason="Perdant du duel /battle")
+            except Exception as e:
+                await interaction.followup.send(
+                    f"⚠️ Impossible d'attribuer le rôle Loser (vérifie que le bot a la permission "
+                    f"'Gérer les rôles' et qu'il est placé au-dessus du rôle Loser) : {e}"
+                )
+
+            until = datetime.now() + timedelta(hours=1)
+            set_battle_penalty(str(loser.id), until)
+
+    finally:
+        battle_active_users.discard(challenger.id)
+        battle_active_users.discard(opponent.id)
 
 bot.run(os.getenv("TOKEN"))
