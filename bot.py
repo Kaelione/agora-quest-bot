@@ -39,6 +39,16 @@ active_chats = {}
 
 DIFFICULTY_POINTS = {"facile": 1, "moyen": 2, "difficile": 3}
 
+# Mots/pseudos à ne jamais laisser passer dans les questions générées automatiquement
+FORBIDDEN_TERMS = ["sangsue"]
+
+def sanitize_text(text):
+    """Retire les pseudos/mots interdits d'un texte (insensible à la casse)."""
+    import re
+    for term in FORBIDDEN_TERMS:
+        text = re.sub(re.escape(term), "[joueur]", text, flags=re.IGNORECASE)
+    return text
+
 def generate_questions_from_text(source_text, source_label=""):
     """Demande à Groq de générer des questions QCM à partir d'un texte, retourne une liste de dicts."""
     system_prompt = (
@@ -55,7 +65,7 @@ def generate_questions_from_text(source_text, source_label=""):
     try:
         raw = ask_groq([
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": source_text[:4000]}
+            {"role": "user", "content": sanitize_text(source_text)[:4000]}
         ])
         cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         parsed = json.loads(cleaned)
@@ -69,9 +79,11 @@ def generate_questions_from_text(source_text, source_label=""):
             difficulty = item.get("difficulty", "moyen").lower()
             if difficulty not in DIFFICULTY_POINTS:
                 difficulty = "moyen"
+            q_text = sanitize_text(item["q"])
+            options = {k: sanitize_text(v) for k, v in item["options"].items()}
             results.append({
-                "q": item["q"],
-                "options": item["options"],
+                "q": q_text,
+                "options": options,
                 "a": item["a"].upper(),
                 "difficulty": difficulty,
                 "points": DIFFICULTY_POINTS[difficulty]
@@ -128,9 +140,9 @@ async def generate_questions_from_forum(forum_channel, limit=10):
 
             try:
                 starter = thread.starter_message or await thread.fetch_message(thread.id)
-                content = f"{thread.name}\n\n{starter.content}"
+                content = sanitize_text(f"{thread.name}\n\n{starter.content}")
             except Exception:
-                content = thread.name
+                content = sanitize_text(thread.name)
 
             if len(content.strip()) < 30:
                 cur.execute("INSERT INTO processed_threads (thread_id) VALUES (%s) ON CONFLICT DO NOTHING", (thread_id,))
@@ -761,9 +773,19 @@ async def check_loser_roles():
             finally:
                 release_conn(conn2)
 
+GUILD_ID = os.getenv("GUILD_ID")  # optionnel : ID de ton serveur, pour une sync instantanée des commandes
+
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    if GUILD_ID:
+        guild_obj = discord.Object(id=int(GUILD_ID))
+        bot.tree.copy_global_to(guild=guild_obj)
+        await bot.tree.sync(guild=guild_obj)
+        print(f"✅ Commandes synchronisées instantanément sur le serveur {GUILD_ID}")
+    else:
+        await bot.tree.sync()
+        print("ℹ️ Sync globale lancée (peut prendre jusqu'à 1h pour apparaître partout)")
+
     if not check_monthly_reset.is_running():
         check_monthly_reset.start()
     if not auto_generate_questions.is_running():
