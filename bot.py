@@ -755,14 +755,18 @@ async def check_loser_roles():
 
         if loser_until <= now:
             for guild in bot.guilds:
-                member = guild.get_member(int(user_id))
+                try:
+                    member = await guild.fetch_member(int(user_id))
+                except Exception:
+                    member = None
                 if member:
                     role = discord.utils.get(guild.roles, name="Loser")
                     if role and role in member.roles:
                         try:
                             await member.remove_roles(role, reason="Fin de la sanction /battle")
-                        except Exception:
-                            pass
+                            print(f"✅ Rôle Loser retiré de {member.name}")
+                        except Exception as e:
+                            print(f"⚠️ Impossible de retirer le rôle Loser de {user_id}: {e}")
 
             conn2 = get_conn()
             try:
@@ -774,6 +778,13 @@ async def check_loser_roles():
                 release_conn(conn2)
 
 GUILD_ID = os.getenv("GUILD_ID")  # optionnel : ID de ton serveur, pour une sync instantanée des commandes
+
+@bot.event
+async def on_guild_join(guild):
+    """Sécurité anti-vol : le bot quitte automatiquement tout serveur qui n'est pas le tien."""
+    if GUILD_ID and str(guild.id) != GUILD_ID:
+        print(f"⚠️ Tentative d'ajout sur un serveur non autorisé : {guild.name} ({guild.id}) — départ automatique.")
+        await guild.leave()
 
 @bot.event
 async def on_ready():
