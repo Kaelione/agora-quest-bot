@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import os
 import json
+import re
 from datetime import datetime, timedelta
 from flask import Flask
 import threading
@@ -937,6 +938,30 @@ async def stopchat(interaction: discord.Interaction):
 PING_ALL_TRIGGERS = ["ping tout le monde", "ping tout le serveur", "ping everyone", "ping tlm"]
 last_ping_all_time = None  # cooldown global anti-spam
 
+def extract_ping_exceptions(message):
+    """Retourne (ids explicitement mentionnés à exclure, noms tapés en texte à exclure)."""
+    excluded_ids = {m.id for m in message.mentions}
+
+    content_lower = message.content.lower()
+    excluded_names = []
+    if "sauf" in content_lower:
+        after = content_lower.split("sauf", 1)[1]
+        after_clean = re.sub(r"<@!?\d+>", "", after)  # retire les mentions déjà comptées
+        parts = re.split(r"[,;/&]|(?:\bet\b)", after_clean)
+        excluded_names = [p.strip() for p in parts if p.strip()]
+
+    return excluded_ids, excluded_names
+
+def is_ping_excluded(member, excluded_ids, excluded_names):
+    if member.id in excluded_ids:
+        return True
+    display = member.display_name.lower()
+    username = member.name.lower()
+    for name in excluded_names:
+        if name and (name in display or name in username or display in name or username in name):
+            return True
+    return False
+
 async def handle_ping_all(message):
     global last_ping_all_time
     now = datetime.now()
@@ -953,6 +978,10 @@ async def handle_ping_all(message):
         await message.channel.send("⚠️ Impossible de récupérer la liste des membres.")
         print(f"Erreur fetch_members: {e}")
         return
+
+    excluded_ids, excluded_names = extract_ping_exceptions(message)
+    if excluded_ids or excluded_names:
+        members = [m for m in members if not is_ping_excluded(m, excluded_ids, excluded_names)]
 
     if not members:
         await message.channel.send("Y'a personne à ping, le serveur est vide 👀")
