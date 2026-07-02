@@ -71,6 +71,10 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_points INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_streak INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_month_points INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS monthly_top1_count INTEGER DEFAULT 0")
+        # Rattrape best_streak pour les joueurs qui avaient déjà une streak en cours
+        # avant l'ajout de cette colonne
+        cur.execute("UPDATE users SET best_streak = streak WHERE best_streak = 0 AND streak > 0")
         # Récupère l'historique existant : comme aucun reset n'a encore eu lieu,
         # "points" représente déjà le total depuis le début pour l'instant.
         cur.execute("UPDATE users SET total_points = points WHERE total_points = 0 AND points > 0")
@@ -381,6 +385,15 @@ async def check_monthly_reset():
         last_reset = row[0] if row else None
 
         if last_reset != current_month:
+            # Compte comme "top 1" tous les joueurs à égalité en tête (s'il y a égalité)
+            cur.execute("SELECT MAX(points) FROM users")
+            max_points = cur.fetchone()[0]
+            if max_points and max_points > 0:
+                cur.execute(
+                    "UPDATE users SET monthly_top1_count = monthly_top1_count + 1 WHERE points = %s",
+                    (max_points,)
+                )
+
             cur.execute("UPDATE users SET best_month_points = GREATEST(best_month_points, points)")
             cur.execute("UPDATE users SET points = 0")
             cur.execute(
@@ -583,7 +596,7 @@ async def stat(interaction: discord.Interaction, membre: discord.Member = None):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT total_points, points, streak, best_streak, best_month_points "
+            "SELECT total_points, points, streak, best_streak, best_month_points, monthly_top1_count "
             "FROM users WHERE user_id = %s",
             (user_id,)
         )
@@ -593,9 +606,9 @@ async def stat(interaction: discord.Interaction, membre: discord.Member = None):
         release_conn(conn)
 
     if row is None:
-        total_points, month_points, streak, best_streak, best_month_points = 0, 0, 0, 0, 0
+        total_points, month_points, streak, best_streak, best_month_points, top1_count = 0, 0, 0, 0, 0, 0
     else:
-        total_points, month_points, streak, best_streak, best_month_points = row
+        total_points, month_points, streak, best_streak, best_month_points, top1_count = row
 
     joined_str = target.joined_at.strftime("%d/%m/%Y") if target.joined_at else "Inconnue"
     roles = [role.mention for role in target.roles if role.name != "@everyone"]
@@ -612,6 +625,7 @@ async def stat(interaction: discord.Interaction, membre: discord.Member = None):
     embed.add_field(name="🌟 Meilleur mois", value=str(best_month_points), inline=True)
     embed.add_field(name="🔥 Streak actuelle", value=f"{streak} jour(s)", inline=True)
     embed.add_field(name="🚀 Meilleure streak", value=f"{best_streak} jour(s)", inline=True)
+    embed.add_field(name="👑 Fois classé n°1 (mensuel)", value=str(top1_count), inline=True)
     embed.add_field(name="🎭 Rôles", value=roles_str, inline=False)
 
     await interaction.response.send_message(embed=embed)
