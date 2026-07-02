@@ -1128,9 +1128,14 @@ async def battle(interaction: discord.Interaction, adversaire: discord.Member):
         battle_active_users.discard(challenger.id)
         battle_active_users.discard(opponent.id)
 
+OWNER_ID = os.getenv("OWNER_ID")  # ton ID Discord, seul autorisé à utiliser /exclure_post
+
 @bot.tree.command(name="exclure_post", description="Empêche un post du forum d'être utilisé pour générer des questions")
 @app_commands.describe(post="Le post/thread du forum à exclure")
 async def exclure_post(interaction: discord.Interaction, post: discord.Thread):
+    if OWNER_ID and str(interaction.user.id) != OWNER_ID:
+        await interaction.response.send_message("⛔ Seul le propriétaire du bot peut utiliser cette commande.", ephemeral=True)
+        return
     conn = get_conn()
     try:
         cur = conn.cursor()
