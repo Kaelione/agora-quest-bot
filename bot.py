@@ -911,7 +911,9 @@ async def chat(interaction: discord.Interaction):
         {
             "role": "system",
             "content": (
-                "Tu es un assistant sympa et détendu qui discute sur un serveur Discord. "
+                "Tu es un pote sur un serveur Discord, un peu chambreur et cash, style trash talk sympa entre potes. "
+                "Tu peux clasher gentiment, taquiner, être un peu insolent, mais jamais méchant ou blessant pour de vrai. "
+                "Reste toujours drôle et bon enfant, pas de propos discriminants ou dégradants. "
                 "Réponds de façon naturelle, concise (pas de pavé), et dans la même langue que l'utilisateur."
             )
         }
@@ -927,6 +929,54 @@ async def stopchat(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Tu n'as pas de conversation active.", ephemeral=True)
 
+PING_ALL_TRIGGERS = ["ping tout le monde", "ping tout le serveur", "ping everyone", "ping tlm"]
+last_ping_all_time = None  # cooldown global anti-spam
+
+async def handle_ping_all(message):
+    global last_ping_all_time
+    now = datetime.now()
+
+    if last_ping_all_time and (now - last_ping_all_time) < timedelta(minutes=10):
+        remaining = 10 - int((now - last_ping_all_time).total_seconds() / 60)
+        await message.channel.send(f"⏳ Doucement, on a déjà ping tout le monde récemment. Réessaie dans ~{remaining} min.")
+        return
+
+    guild = message.guild
+    try:
+        members = [m async for m in guild.fetch_members(limit=None) if not m.bot]
+    except Exception as e:
+        await message.channel.send("⚠️ Impossible de récupérer la liste des membres.")
+        print(f"Erreur fetch_members: {e}")
+        return
+
+    if not members:
+        await message.channel.send("Y'a personne à ping, le serveur est vide 👀")
+        return
+
+    last_ping_all_time = now
+
+    try:
+        intro = ask_groq([
+            {"role": "system", "content": "Tu es un troll sympa qui va ping tout le serveur pour rigoler avec ses potes. Reste bon enfant."},
+            {"role": "user", "content": "Génère une seule phrase courte et fun pour annoncer que tu vas ping tout le monde."}
+        ])
+    except Exception:
+        intro = "🚨 Réveillez-vous tout le monde !"
+
+    chunks = []
+    current = intro.strip() + "\n\n"
+    for member in members:
+        piece = member.mention + " "
+        if len(current) + len(piece) > 1900:
+            chunks.append(current)
+            current = ""
+        current += piece
+    if current.strip():
+        chunks.append(current)
+
+    for chunk in chunks:
+        await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions(users=True))
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -936,6 +986,11 @@ async def on_message(message):
 
     # Si l'utilisateur est en mode chat et que ce n'est pas une commande (!ping)
     if user_id in active_chats and not message.content.startswith("!"):
+        lowered = message.content.lower()
+        if message.guild and any(trigger in lowered for trigger in PING_ALL_TRIGGERS):
+            await handle_ping_all(message)
+            return
+
         active_chats[user_id].append({"role": "user", "content": message.content})
         async with message.channel.typing():
             try:
