@@ -779,9 +779,13 @@ GUILD_ID = os.getenv("GUILD_ID")  # optionnel : ID de ton serveur, pour une sync
 async def on_ready():
     if GUILD_ID:
         guild_obj = discord.Object(id=int(GUILD_ID))
+        # Nettoie les anciennes commandes globales pour éviter les doublons
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        # Puis synchronise uniquement sur le serveur, instantanément
         bot.tree.copy_global_to(guild=guild_obj)
         await bot.tree.sync(guild=guild_obj)
-        print(f"✅ Commandes synchronisées instantanément sur le serveur {GUILD_ID}")
+        print(f"✅ Commandes synchronisées instantanément sur le serveur {GUILD_ID} (globales nettoyées)")
     else:
         await bot.tree.sync()
         print("ℹ️ Sync globale lancée (peut prendre jusqu'à 1h pour apparaître partout)")
