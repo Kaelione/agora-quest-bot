@@ -1,5 +1,6 @@
 import discord
-from discord.ext import commands
+from discord import app_commands
+from discord.ext import commands, tasks
 import os
 from datetime import datetime
 import random
@@ -67,6 +68,27 @@ def init_db():
         """)
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS streak INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_played TEXT")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_points INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_streak INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS best_month_points INTEGER DEFAULT 0")
+        # Récupère l'historique existant : comme aucun reset n'a encore eu lieu,
+        # "points" représente déjà le total depuis le début pour l'instant.
+        cur.execute("UPDATE users SET total_points = points WHERE total_points = 0 AND points > 0")
+
+        # Table pour suivre les infos système (comme le dernier reset mensuel)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        # On initialise le mois courant SANS reset si c'est la 1ère fois qu'on lance ce système
+        # (évite de remettre tout le monde à 0 dès le déploiement de cette fonctionnalité)
+        cur.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_reset_month', %s) ON CONFLICT (key) DO NOTHING",
+            (datetime.now().strftime("%Y-%m"),)
+        )
+
         conn.commit()
         cur.close()
     finally:
@@ -195,8 +217,8 @@ def add_points(user_id, amount):
         daily += amount
 
         cur.execute(
-            "UPDATE users SET points = %s, daily = %s, date = %s WHERE user_id = %s",
-            (points, daily, date, user_id)
+            "UPDATE users SET points = %s, daily = %s, date = %s, total_points = total_points + %s WHERE user_id = %s",
+            (points, daily, date, amount, user_id)
         )
         conn.commit()
         cur.close()
@@ -205,22 +227,44 @@ def add_points(user_id, amount):
         release_conn(conn)
 
 def add_direct_points(user_id, amount):
-    """Ajoute des points bonus sans les compter dans la limite quotidienne."""
+    """Ajoute des points bonus sans les compter dans la limite quotidienne (mais comptés dans le total historique)."""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("UPDATE users SET points = points + %s WHERE user_id = %s", (amount, user_id))
+        cur.execute(
+            "UPDATE users SET points = points + %s, total_points = total_points + %s WHERE user_id = %s",
+            (amount, amount, user_id)
+        )
         conn.commit()
         cur.close()
     finally:
         release_conn(conn)
 
-STREAK_BONUS = 10          # points bonus donnés à chaque palier
-STREAK_MILESTONE = 5       # un palier tous les X jours de streak
+STREAK_MILESTONE = 5  # un palier tous les X jours de streak
+STREAK_BONUS_CAP = 50  # plafond du bonus par palier
+
+def get_streak_bonus(streak):
+    """
+    Calcule le bonus de points pour un palier de streak donné.
+    Paliers : 5j->5, 10j->7, 15j->10, 20j->15, 25j->20, 30j->25,
+    puis +5 par palier supplémentaire, plafonné à 50.
+    """
+    if streak % STREAK_MILESTONE != 0:
+        return 0
+
+    n = streak // STREAK_MILESTONE  # numéro du palier (1, 2, 3...)
+    explicit_bonuses = {1: 5, 2: 7, 3: 10, 4: 15, 5: 20, 6: 25}
+
+    if n in explicit_bonuses:
+        bonus = explicit_bonuses[n]
+    else:
+        bonus = 25 + (n - 6) * 5
+
+    return min(bonus, STREAK_BONUS_CAP)
 
 def update_streak(user_id):
     """
-    Met à jour le streak d'un joueur suite à une bonne réponse au !defi.
+    Met à jour le streak d'un joueur suite à une bonne réponse au /defi.
     Retourne (streak_actuel, bonus_gagné_cette_fois).
     """
     today = datetime.now().strftime("%Y-%m-%d")
@@ -253,15 +297,14 @@ def update_streak(user_id):
             streak = 1  # streak cassé (ou premier jour) -> on repart à 1
 
         cur.execute(
-            "UPDATE users SET streak = %s, last_played = %s WHERE user_id = %s",
-            (streak, today, user_id)
+            "UPDATE users SET streak = %s, last_played = %s, best_streak = GREATEST(best_streak, %s) WHERE user_id = %s",
+            (streak, today, streak, user_id)
         )
         conn.commit()
         cur.close()
 
-        bonus = 0
-        if streak % STREAK_MILESTONE == 0:
-            bonus = STREAK_BONUS
+        bonus = get_streak_bonus(streak)
+        if bonus > 0:
             add_direct_points(user_id, bonus)
 
         return streak, bonus
@@ -327,9 +370,35 @@ class QuizView(discord.ui.View):
         except Exception:
             pass
 
+@tasks.loop(hours=6)
+async def check_monthly_reset():
+    current_month = datetime.now().strftime("%Y-%m")
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM meta WHERE key = 'last_reset_month'")
+        row = cur.fetchone()
+        last_reset = row[0] if row else None
+
+        if last_reset != current_month:
+            cur.execute("UPDATE users SET best_month_points = GREATEST(best_month_points, points)")
+            cur.execute("UPDATE users SET points = 0")
+            cur.execute(
+                "INSERT INTO meta (key, value) VALUES ('last_reset_month', %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = %s",
+                (current_month, current_month)
+            )
+            conn.commit()
+            print(f"🔄 Reset mensuel effectué pour {current_month}")
+        cur.close()
+    finally:
+        release_conn(conn)
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
+    if not check_monthly_reset.is_running():
+        check_monthly_reset.start()
     print(f"{bot.user} est connecté et en ligne !")
 
 @bot.command()
@@ -421,7 +490,7 @@ async def streak(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"🔥 {interaction.user.name}\n"
         f"Streak actuel : {current_streak} jour(s)\n"
-        f"Prochain palier ({next_milestone} jours) dans {remaining} jour(s) — récompense : +{STREAK_BONUS} points"
+        f"Prochain palier ({next_milestone} jours) dans {remaining} jour(s) — récompense : +{get_streak_bonus(next_milestone)} points"
     )
 
 @bot.tree.command(name="chat", description="Active le mode conversation avec l'IA")
@@ -503,5 +572,48 @@ async def classement(interaction: discord.Interaction):
     streak_text = await format_leaderboard(top_streak, "Classement Streak", "🔥", "jour(s)")
 
     await interaction.followup.send(f"{points_text}\n\n{streak_text}")
+
+@bot.tree.command(name="stat", description="Affiche les statistiques d'un joueur (toi-même par défaut)")
+@app_commands.describe(membre="Le membre à consulter (laisse vide pour toi-même)")
+async def stat(interaction: discord.Interaction, membre: discord.Member = None):
+    target = membre or interaction.user
+    user_id = str(target.id)
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT total_points, points, streak, best_streak, best_month_points "
+            "FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if row is None:
+        total_points, month_points, streak, best_streak, best_month_points = 0, 0, 0, 0, 0
+    else:
+        total_points, month_points, streak, best_streak, best_month_points = row
+
+    joined_str = target.joined_at.strftime("%d/%m/%Y") if target.joined_at else "Inconnue"
+    roles = [role.mention for role in target.roles if role.name != "@everyone"]
+    roles_str = ", ".join(roles) if roles else "Aucun rôle"
+
+    embed = discord.Embed(
+        title=f"📊 Statistiques de {target.display_name}",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="📅 A rejoint le serveur", value=joined_str, inline=False)
+    embed.add_field(name="🏆 Points totaux (depuis le début)", value=str(total_points), inline=True)
+    embed.add_field(name="📆 Points ce mois-ci", value=str(month_points), inline=True)
+    embed.add_field(name="🌟 Meilleur mois", value=str(best_month_points), inline=True)
+    embed.add_field(name="🔥 Streak actuelle", value=f"{streak} jour(s)", inline=True)
+    embed.add_field(name="🚀 Meilleure streak", value=f"{best_streak} jour(s)", inline=True)
+    embed.add_field(name="🎭 Rôles", value=roles_str, inline=False)
+
+    await interaction.response.send_message(embed=embed)
 
 bot.run(os.getenv("TOKEN"))
