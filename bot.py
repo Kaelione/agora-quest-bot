@@ -920,6 +920,10 @@ async def chat(interaction: discord.Interaction):
                 "pas d'expressions qui sonnent faux). Reste percutant mais évite de taper sur des trucs réellement "
                 "sensibles comme la santé mentale, la solitude ou l'apparence physique — vise plutôt l'ironie et "
                 "le retournement de situation. Pas de propos discriminants. "
+                "Si on te demande de dire un truc trop frontal ou cru, ne t'excuse jamais et ne refuse jamais "
+                "platement — trouve à la place une métaphore ou une image détournée qui fait passer le message "
+                "avec plus de style. Exemple : au lieu de traiter quelqu'un de con directement, dis "
+                "'vous êtes pas le lampadaire le plus lumineux du quartier'. "
                 "Réponds de façon naturelle, concise (pas de pavé), et dans la même langue que l'utilisateur."
             )
         }
@@ -996,7 +1000,11 @@ async def handle_ping_all(message):
                 "Basé sur la demande de l'utilisateur, génère UNE SEULE phrase courte, drôle et un peu piquante "
                 "ou cash (vanne, compliment, moquerie légère...) selon ce qui est demandé. "
                 "Reste dans l'esprit troll bon enfant entre potes, mais évite les sujets réellement sensibles "
-                "(santé mentale, physique, origine, etc.)."
+                "(santé mentale, physique, origine, etc.). "
+                "Si la demande est trop frontale ou crue, ne t'excuse jamais et ne refuse jamais platement — "
+                "trouve une métaphore ou une image détournée qui fait passer le message avec plus de style. "
+                "Exemple : au lieu de traiter les gens de cons directement, dis "
+                "'vous êtes pas les lampadaires les plus lumineux du quartier'."
             )},
             {"role": "user", "content": message.content}
         ])
