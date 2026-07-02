@@ -991,8 +991,14 @@ async def handle_ping_all(message):
 
     try:
         intro = ask_groq([
-            {"role": "system", "content": "Tu es un troll sympa qui va ping tout le serveur pour rigoler avec ses potes. Reste bon enfant."},
-            {"role": "user", "content": "Génère une seule phrase courte et fun pour annoncer que tu vas ping tout le monde."}
+            {"role": "system", "content": (
+                "Tu es un troll potache qui va ping tout le serveur pour passer un message à tout le monde. "
+                "Basé sur la demande de l'utilisateur, génère UNE SEULE phrase courte, drôle et un peu piquante "
+                "ou cash (vanne, compliment, moquerie légère...) selon ce qui est demandé. "
+                "Reste dans l'esprit troll bon enfant entre potes, mais évite les sujets réellement sensibles "
+                "(santé mentale, physique, origine, etc.)."
+            )},
+            {"role": "user", "content": message.content}
         ])
     except Exception:
         intro = "🚨 Réveillez-vous tout le monde !"
