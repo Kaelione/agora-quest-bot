@@ -331,6 +331,7 @@ def get_random_question(exclude_texts=None):
 # =========================================================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True  # nécessaire pour lister les membres (ping général, etc.)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 DAILY_LIMIT = 50
