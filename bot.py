@@ -515,7 +515,7 @@ def update_streak(user_id):
 
 class QuizView(discord.ui.View):
     def __init__(self, question, author_id):
-        super().__init__(timeout=30)
+        super().__init__(timeout=45)
         self.question = question
         self.author_id = author_id
         self.answered = False
@@ -1127,5 +1127,25 @@ async def battle(interaction: discord.Interaction, adversaire: discord.Member):
     finally:
         battle_active_users.discard(challenger.id)
         battle_active_users.discard(opponent.id)
+
+@bot.tree.command(name="exclure_post", description="Empêche un post du forum d'être utilisé pour générer des questions")
+@app_commands.describe(post="Le post/thread du forum à exclure")
+async def exclure_post(interaction: discord.Interaction, post: discord.Thread):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO processed_threads (thread_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (str(post.id),)
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    await interaction.response.send_message(
+        f"🚫 Le post **{post.name}** est désormais exclu de la génération de questions (il ne sera jamais scanné).",
+        ephemeral=True
+    )
 
 bot.run(os.getenv("TOKEN"))
