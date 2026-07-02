@@ -1153,4 +1153,25 @@ async def exclure_post(interaction: discord.Interaction, post: discord.Thread):
         ephemeral=True
     )
 
+@bot.tree.command(name="reintegrer_post", description="Annule l'exclusion d'un post, il pourra à nouveau être scanné")
+@app_commands.describe(post="Le post/thread du forum à réintégrer")
+async def reintegrer_post(interaction: discord.Interaction, post: discord.Thread):
+    if OWNER_ID and str(interaction.user.id) != OWNER_ID:
+        await interaction.response.send_message("⛔ Seul le propriétaire du bot peut utiliser cette commande.", ephemeral=True)
+        return
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM processed_threads WHERE thread_id = %s", (str(post.id),))
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    await interaction.response.send_message(
+        f"✅ Le post **{post.name}** est réintégré, il pourra être scanné au prochain `/generer_questions`.",
+        ephemeral=True
+    )
+
 bot.run(os.getenv("TOKEN"))
