@@ -340,6 +340,10 @@ DAILY_LIMIT = 50
 # Suivi des joueurs actuellement en plein duel (empêche les doublons de duel)
 battle_active_users = set()
 
+def has_loser_role(member):
+    """Vérifie si un membre possède actuellement le rôle Loser, peu importe comment il l'a obtenu."""
+    return discord.utils.get(member.roles, name="Loser") is not None
+
 def get_battle_cooldown(user_id):
     """Retourne la date/heure jusqu'à laquelle le joueur ne peut pas relancer de duel (ou None)."""
     conn = get_conn()
@@ -388,6 +392,22 @@ async def get_or_create_loser_role(guild):
             reason="Rôle créé automatiquement pour /battle"
         )
     return role
+
+@bot.event
+async def on_member_update(before, after):
+    """Dès que le rôle Loser est ajouté à quelqu'un (peu importe qui l'attribue), programme son retrait dans 1h."""
+    before_role_ids = {r.id for r in before.roles}
+    after_role_ids = {r.id for r in after.roles}
+    newly_added = after_role_ids - before_role_ids
+
+    if not newly_added:
+        return
+
+    loser_role = discord.utils.get(after.guild.roles, name="Loser")
+    if loser_role and loser_role.id in newly_added:
+        until = datetime.now() + timedelta(hours=1)
+        set_battle_penalty(str(after.id), until)
+        print(f"⏱️ Rôle Loser détecté sur {after.name} — retrait programmé dans 1h")
 
 def add_points(user_id, amount):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -853,6 +873,12 @@ async def score(interaction: discord.Interaction):
 
 @bot.tree.command(name="defi", description="Répond à une question quiz du serveur")
 async def defi(interaction: discord.Interaction):
+    if isinstance(interaction.user, discord.Member) and has_loser_role(interaction.user):
+        await interaction.response.send_message(
+            "🚫 Tu as le rôle **Loser**, tu ne peux pas jouer pour le moment !", ephemeral=True
+        )
+        return
+
     question = get_random_question()
     if question is None:
         await interaction.response.send_message("⚠️ Aucune question disponible pour l'instant.", ephemeral=True)
@@ -1156,13 +1182,10 @@ async def battle(interaction: discord.Interaction, adversaire: discord.Member):
         await interaction.response.send_message("Tu ne peux pas défier un bot !", ephemeral=True)
         return
 
-    now = datetime.now()
     for user in (challenger, opponent):
-        cooldown = get_battle_cooldown(str(user.id))
-        if cooldown and cooldown > now:
-            remaining = int((cooldown - now).total_seconds() / 60) + 1
+        if has_loser_role(user):
             await interaction.response.send_message(
-                f"⏳ {user.mention} doit encore attendre {remaining} minute(s) avant de pouvoir se battre.",
+                f"🚫 {user.mention} a le rôle **Loser**, impossible de jouer pour le moment.",
                 ephemeral=True
             )
             return
