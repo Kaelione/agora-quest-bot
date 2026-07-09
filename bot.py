@@ -58,9 +58,11 @@ def generate_questions_from_text(source_text, source_label=""):
         "qui testent la compréhension du contenu. "
         "Réponds STRICTEMENT avec un tableau JSON, sans texte autour, sans balises markdown, au format exact :\n"
         '[{"q": "texte de la question", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
-        '"a": "A", "difficulty": "facile"}]\n'
+        '"a": "A", "difficulty": "facile", "theme": "stratégie"}]\n'
         'Le champ "a" doit être la lettre de la bonne réponse. '
-        'Le champ "difficulty" doit être "facile", "moyen" ou "difficile" selon la complexité de la question.'
+        'Le champ "difficulty" doit être "facile", "moyen" ou "difficile" selon la complexité de la question. '
+        'Le champ "theme" doit être un court mot-clé (1 à 2 mots) résumant le sujet de la question '
+        '(ex: "stratégie", "rôles", "vote", "vocabulaire").'
     )
 
     try:
@@ -82,12 +84,14 @@ def generate_questions_from_text(source_text, source_label=""):
                 difficulty = "moyen"
             q_text = sanitize_text(item["q"])
             options = {k: sanitize_text(v) for k, v in item["options"].items()}
+            theme = sanitize_text(item.get("theme", "général")).strip() or "général"
             results.append({
                 "q": q_text,
                 "options": options,
                 "a": item["a"].upper(),
                 "difficulty": difficulty,
-                "points": DIFFICULTY_POINTS[difficulty]
+                "points": DIFFICULTY_POINTS[difficulty],
+                "theme": theme
             })
         except (KeyError, AttributeError):
             continue
@@ -104,9 +108,9 @@ def save_questions_to_db(question_list, source=""):
             try:
                 opts = q["options"]
                 cur.execute(
-                    "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points, source) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
-                    (q["q"], opts["A"], opts["B"], opts["C"], opts["D"], q["a"], q["difficulty"], q["points"], source)
+                    "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points, theme, source) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
+                    (q["q"], opts["A"], opts["B"], opts["C"], opts["D"], q["a"], q["difficulty"], q["points"], q.get("theme", "général"), source)
                 )
                 if cur.rowcount > 0:
                     saved += 1
@@ -218,9 +222,11 @@ def init_db():
                 correct TEXT NOT NULL,
                 difficulty TEXT NOT NULL,
                 points INTEGER NOT NULL,
+                theme TEXT NOT NULL DEFAULT 'général',
                 source TEXT
             )
         """)
+        cur.execute("ALTER TABLE questions ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'général'")
 
         # Threads du forum déjà utilisés pour générer des questions (évite les doublons)
         cur.execute("""
@@ -231,18 +237,18 @@ def init_db():
 
         # Questions de départ (migrées une seule fois, ensuite tout vit en base)
         seed_questions = [
-            ("Est ce une bonne idée de disso ?", "Oui", "ça dépend de qui est loup avec nous", "Non", "ça dépend de qui est dans la game", "D", "moyen", 2),
-            ("Quel est la meilleure catégorie de role pour une réflexion totale ?", "les roles a info", "les roles de protection", "les roles passifs", "les loups", "C", "difficile", 3),
-            ("C'est quoi des gp complémentaires ?", "deux gp qui s'opposent mais ensemble avancent bien", "deux gp qui se ressemblent et avancent bien ensemble", "deux gp très différents qui se gênent l'un l'autre", "deux gp qui sont exactement les mêmes, sans impact sur l'autre", "A", "facile", 1),
-            ("Dans la technique du \"2 safes 1 loup\" au tour décisif (TD), combien de joueurs de chaque camp restent en jeu ?", "1 safe et 1 loup", "2 safes et 1 loup", "2 loups et 1 safe", "3 safes", "B", "facile", 1),
-            ("Pourquoi le maire doit-il laisser le vote temporairement en égalité pendant le tour décisif ?", "Pour perdre du temps sans raison", "Pour gagner du temps, se placer au centre de l'action et mettre le loup dans une situation critique", "Pour éviter d'avoir à voter", "Pour laisser le safe décider à sa place", "B", "moyen", 2),
-            ("Pourquoi le maire doit-il tuer immédiatement après avoir utilisé la phrase clé (\"oui merci, j'ai win\") ?", "Parce que reporter le choix laisse le loup se recalibrer, alors que tuer immédiatement exploite sa réaction spontanée", "Parce que c'est une règle du jeu obligatoire", "Parce que les autres joueurs préfèrent que ça aille vite", "Parce que le loup l'exige", "A", "difficile", 3),
+            ("Est ce une bonne idée de disso ?", "Oui", "ça dépend de qui est loup avec nous", "Non", "ça dépend de qui est dans la game", "D", "moyen", 2, "stratégie"),
+            ("Quel est la meilleure catégorie de role pour une réflexion totale ?", "les roles a info", "les roles de protection", "les roles passifs", "les loups", "C", "difficile", 3, "rôles"),
+            ("C'est quoi des gp complémentaires ?", "deux gp qui s'opposent mais ensemble avancent bien", "deux gp qui se ressemblent et avancent bien ensemble", "deux gp très différents qui se gênent l'un l'autre", "deux gp qui sont exactement les mêmes, sans impact sur l'autre", "A", "facile", 1, "vocabulaire"),
+            ("Dans la technique du \"2 safes 1 loup\" au tour décisif (TD), combien de joueurs de chaque camp restent en jeu ?", "1 safe et 1 loup", "2 safes et 1 loup", "2 loups et 1 safe", "3 safes", "B", "facile", 1, "stratégie"),
+            ("Pourquoi le maire doit-il laisser le vote temporairement en égalité pendant le tour décisif ?", "Pour perdre du temps sans raison", "Pour gagner du temps, se placer au centre de l'action et mettre le loup dans une situation critique", "Pour éviter d'avoir à voter", "Pour laisser le safe décider à sa place", "B", "moyen", 2, "stratégie"),
+            ("Pourquoi le maire doit-il tuer immédiatement après avoir utilisé la phrase clé (\"oui merci, j'ai win\") ?", "Parce que reporter le choix laisse le loup se recalibrer, alors que tuer immédiatement exploite sa réaction spontanée", "Parce que c'est une règle du jeu obligatoire", "Parce que les autres joueurs préfèrent que ça aille vite", "Parce que le loup l'exige", "A", "difficile", 3, "stratégie"),
         ]
-        for q, a, b, c, d, correct, difficulty, points in seed_questions:
+        for q, a, b, c, d, correct, difficulty, points, theme in seed_questions:
             cur.execute(
-                "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
-                (q, a, b, c, d, correct, difficulty, points)
+                "INSERT INTO questions (q, option_a, option_b, option_c, option_d, correct, difficulty, points, theme) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (q) DO NOTHING",
+                (q, a, b, c, d, correct, difficulty, points, theme)
             )
 
         # Table pour suivre les infos système (comme le dernier reset mensuel)
@@ -286,31 +292,34 @@ threading.Thread(target=run_web).start()
 # =========================================================
 # QUIZ - les questions vivent maintenant en base (table "questions")
 # =========================================================
-def get_random_question(exclude_texts=None):
-    """Pioche une question aléatoire dans la banque, en évitant si possible celles déjà utilisées."""
+def get_random_question(exclude_texts=None, theme=None):
+    """Pioche une question aléatoire dans la banque, en filtrant par thème si demandé
+    (avec repli sur une question au hasard si aucune ne correspond)."""
     exclude_texts = exclude_texts or []
+    columns = "q, option_a, option_b, option_c, option_d, correct, difficulty, points, theme"
+
     conn = get_conn()
     try:
         cur = conn.cursor()
+
+        query = f"SELECT {columns} FROM questions WHERE 1=1"
+        params = []
+        if theme:
+            query += " AND theme ILIKE %s"
+            params.append(f"%{theme}%")
         if exclude_texts:
-            cur.execute(
-                "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
-                "FROM questions WHERE q != ALL(%s) ORDER BY RANDOM() LIMIT 1",
-                (exclude_texts,)
-            )
+            query += " AND q != ALL(%s)"
+            params.append(exclude_texts)
+        query += " ORDER BY RANDOM() LIMIT 1"
+
+        cur.execute(query, tuple(params))
+        row = cur.fetchone()
+
+        if row is None:
+            # Rien trouvé (thème inconnu ou plus de questions inédites) -> repli sur du hasard total
+            cur.execute(f"SELECT {columns} FROM questions ORDER BY RANDOM() LIMIT 1")
             row = cur.fetchone()
-            if row is None:  # plus de questions inédites, on retire la contrainte
-                cur.execute(
-                    "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
-                    "FROM questions ORDER BY RANDOM() LIMIT 1"
-                )
-                row = cur.fetchone()
-        else:
-            cur.execute(
-                "SELECT q, option_a, option_b, option_c, option_d, correct, difficulty, points "
-                "FROM questions ORDER BY RANDOM() LIMIT 1"
-            )
-            row = cur.fetchone()
+
         cur.close()
     finally:
         release_conn(conn)
@@ -318,13 +327,14 @@ def get_random_question(exclude_texts=None):
     if row is None:
         return None
 
-    q, a, b, c, d, correct, difficulty, points = row
+    q, a, b, c, d, correct, difficulty, points, theme_val = row
     return {
         "q": q,
         "options": {"A": a, "B": b, "C": c, "D": d},
         "a": correct,
         "difficulty": difficulty,
-        "points": points
+        "points": points,
+        "theme": theme_val
     }
 
 # =========================================================
@@ -872,25 +882,30 @@ async def score(interaction: discord.Interaction):
     )
 
 @bot.tree.command(name="defi", description="Répond à une question quiz du serveur")
-async def defi(interaction: discord.Interaction):
+@app_commands.describe(theme="Thème souhaité pour la question (optionnel, ex: stratégie, rôles, vocabulaire)")
+async def defi(interaction: discord.Interaction, theme: str = None):
     if isinstance(interaction.user, discord.Member) and has_loser_role(interaction.user):
         await interaction.response.send_message(
             "🚫 Tu as le rôle **Loser**, tu ne peux pas jouer pour le moment !", ephemeral=True
         )
         return
 
-    question = get_random_question()
+    question = get_random_question(theme=theme)
     if question is None:
         await interaction.response.send_message("⚠️ Aucune question disponible pour l'instant.", ephemeral=True)
         return
+
+    fallback_note = ""
+    if theme and theme.lower() not in question["theme"].lower():
+        fallback_note = f"\n\n*(Aucune question sur \"{theme}\", en voici une au hasard.)*"
 
     options_text = "\n".join(
         f"**{letter})** {text}" for letter, text in question["options"].items()
     )
 
     embed = discord.Embed(
-        title=f"🧠 Défi [{question['difficulty'].capitalize()} — {question['points']} pt(s)]",
-        description=f"{question['q']}\n\n{options_text}",
+        title=f"🧠 Défi [{question['difficulty'].capitalize()} — {question['points']} pt(s)] — {question['theme'].capitalize()}",
+        description=f"{question['q']}\n\n{options_text}{fallback_note}",
         color=discord.Color.blurple()
     )
 
@@ -1311,6 +1326,27 @@ async def reintegrer_post(interaction: discord.Interaction, post: discord.Thread
 
     await interaction.response.send_message(
         f"✅ Le post **{post.name}** est réintégré, il pourra être scanné au prochain `/generer_questions`.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="themes", description="Liste les thèmes de questions disponibles pour /defi")
+async def themes(interaction: discord.Interaction):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT theme, COUNT(*) FROM questions GROUP BY theme ORDER BY COUNT(*) DESC")
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if not rows:
+        await interaction.response.send_message("Aucun thème disponible pour l'instant.", ephemeral=True)
+        return
+
+    lines = [f"• **{theme}** ({count} question{'s' if count > 1 else ''})" for theme, count in rows]
+    await interaction.response.send_message(
+        "📚 **Thèmes disponibles** (utilise `/defi theme:...`) :\n" + "\n".join(lines),
         ephemeral=True
     )
 
