@@ -292,8 +292,8 @@ threading.Thread(target=run_web).start()
 # =========================================================
 # QUIZ - les questions vivent maintenant en base (table "questions")
 # =========================================================
-def get_random_question(exclude_texts=None, theme=None):
-    """Pioche une question aléatoire dans la banque, en filtrant par thème si demandé
+def get_random_question(exclude_texts=None, theme=None, difficulty=None):
+    """Pioche une question aléatoire dans la banque, en filtrant par thème et/ou difficulté si demandé
     (avec repli sur une question au hasard si aucune ne correspond)."""
     exclude_texts = exclude_texts or []
     columns = "q, option_a, option_b, option_c, option_d, correct, difficulty, points, theme"
@@ -307,6 +307,9 @@ def get_random_question(exclude_texts=None, theme=None):
         if theme:
             query += " AND theme ILIKE %s"
             params.append(f"%{theme}%")
+        if difficulty:
+            query += " AND difficulty = %s"
+            params.append(difficulty)
         if exclude_texts:
             query += " AND q != ALL(%s)"
             params.append(exclude_texts)
@@ -316,7 +319,7 @@ def get_random_question(exclude_texts=None, theme=None):
         row = cur.fetchone()
 
         if row is None:
-            # Rien trouvé (thème inconnu ou plus de questions inédites) -> repli sur du hasard total
+            # Rien trouvé (filtre trop strict ou plus de questions inédites) -> repli sur du hasard total
             cur.execute(f"SELECT {columns} FROM questions ORDER BY RANDOM() LIMIT 1")
             row = cur.fetchone()
 
@@ -327,12 +330,12 @@ def get_random_question(exclude_texts=None, theme=None):
     if row is None:
         return None
 
-    q, a, b, c, d, correct, difficulty, points, theme_val = row
+    q, a, b, c, d, correct, difficulty_val, points, theme_val = row
     return {
         "q": q,
         "options": {"A": a, "B": b, "C": c, "D": d},
         "a": correct,
-        "difficulty": difficulty,
+        "difficulty": difficulty_val,
         "points": points,
         "theme": theme_val
     }
@@ -882,22 +885,36 @@ async def score(interaction: discord.Interaction):
     )
 
 @bot.tree.command(name="defi", description="Répond à une question quiz du serveur")
-@app_commands.describe(theme="Thème souhaité pour la question (optionnel, ex: stratégie, rôles, vocabulaire)")
-async def defi(interaction: discord.Interaction, theme: str = None):
+@app_commands.describe(
+    theme="Thème souhaité pour la question (optionnel, ex: stratégie, rôles, vocabulaire)",
+    difficulte="Niveau de difficulté souhaité (optionnel)"
+)
+@app_commands.choices(difficulte=[
+    app_commands.Choice(name="Facile", value="facile"),
+    app_commands.Choice(name="Moyen", value="moyen"),
+    app_commands.Choice(name="Difficile", value="difficile"),
+])
+async def defi(interaction: discord.Interaction, theme: str = None, difficulte: app_commands.Choice[str] = None):
     if isinstance(interaction.user, discord.Member) and has_loser_role(interaction.user):
         await interaction.response.send_message(
             "🚫 Tu as le rôle **Loser**, tu ne peux pas jouer pour le moment !", ephemeral=True
         )
         return
 
-    question = get_random_question(theme=theme)
+    difficulte_value = difficulte.value if difficulte else None
+    question = get_random_question(theme=theme, difficulty=difficulte_value)
     if question is None:
         await interaction.response.send_message("⚠️ Aucune question disponible pour l'instant.", ephemeral=True)
         return
 
     fallback_note = ""
+    mismatch_reasons = []
     if theme and theme.lower() not in question["theme"].lower():
-        fallback_note = f"\n\n*(Aucune question sur \"{theme}\", en voici une au hasard.)*"
+        mismatch_reasons.append(f'thème "{theme}"')
+    if difficulte_value and question["difficulty"] != difficulte_value:
+        mismatch_reasons.append(f'difficulté "{difficulte_value}"')
+    if mismatch_reasons:
+        fallback_note = f"\n\n*(Aucune question pour {' et '.join(mismatch_reasons)}, en voici une au hasard.)*"
 
     options_text = "\n".join(
         f"**{letter})** {text}" for letter, text in question["options"].items()
