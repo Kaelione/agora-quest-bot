@@ -38,6 +38,42 @@ def ask_groq(messages):
 # Stocke les conversations actives : {user_id: [liste de messages]}
 active_chats = {}
 
+MAX_MEMORY_MESSAGES = 30  # nombre de messages (hors system) conservés par utilisateur
+
+def load_chat_memory(user_id):
+    """Charge l'historique de conversation persistant d'un utilisateur (liste de messages, sans le system prompt)."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT messages FROM chat_memory WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if row is None or row[0] is None:
+        return []
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return []
+
+def save_chat_memory(user_id, messages):
+    """Sauvegarde l'historique de conversation (hors system prompt), tronqué aux derniers messages."""
+    trimmed = messages[-MAX_MEMORY_MESSAGES:]
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO chat_memory (user_id, messages) VALUES (%s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET messages = %s",
+            (user_id, json.dumps(trimmed), json.dumps(trimmed))
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
 DIFFICULTY_POINTS = {"facile": 1, "moyen": 2, "difficile": 3}
 
 # Mots/pseudos à ne jamais laisser passer dans les questions générées automatiquement
@@ -235,6 +271,14 @@ def init_db():
             )
         """)
 
+        # Mémoire de conversation /chat, persistante entre les sessions
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memory (
+                user_id TEXT PRIMARY KEY,
+                messages TEXT
+            )
+        """)
+
         # Questions de départ (migrées une seule fois, ensuite tout vit en base)
         seed_questions = [
             ("Est ce une bonne idée de disso ?", "Oui", "ça dépend de qui est loup avec nous", "Non", "ça dépend de qui est dans la game", "D", "moyen", 2, "stratégie"),
@@ -305,7 +349,8 @@ def get_random_question(exclude_texts=None, theme=None, difficulty=None):
         query = f"SELECT {columns} FROM questions WHERE 1=1"
         params = []
         if theme:
-            query += " AND theme ILIKE %s"
+            query += " AND (theme ILIKE %s OR q ILIKE %s)"
+            params.append(f"%{theme}%")
             params.append(f"%{theme}%")
         if difficulty:
             query += " AND difficulty = %s"
@@ -317,6 +362,7 @@ def get_random_question(exclude_texts=None, theme=None, difficulty=None):
 
         cur.execute(query, tuple(params))
         row = cur.fetchone()
+        matched_filter = row is not None
 
         if row is None:
             # Rien trouvé (filtre trop strict ou plus de questions inédites) -> repli sur du hasard total
@@ -337,7 +383,8 @@ def get_random_question(exclude_texts=None, theme=None, difficulty=None):
         "a": correct,
         "difficulty": difficulty_val,
         "points": points,
-        "theme": theme_val
+        "theme": theme_val,
+        "matched_filter": matched_filter
     }
 
 # =========================================================
@@ -884,6 +931,77 @@ async def score(interaction: discord.Interaction):
         f"Points aujourd'hui : {daily}/{DAILY_LIMIT}"
     )
 
+async def search_and_generate_from_forum(theme):
+    """Cherche un post du forum 'savoir' (FORUM_CHANNEL_ID) lié au thème demandé,
+    génère une question à la volée à partir de son contenu, et la sauvegarde en base."""
+    if not FORUM_CHANNEL_ID:
+        return None
+
+    try:
+        channel = bot.get_channel(int(FORUM_CHANNEL_ID)) or await bot.fetch_channel(int(FORUM_CHANNEL_ID))
+    except Exception:
+        return None
+
+    if not isinstance(channel, discord.ForumChannel):
+        return None
+
+    all_threads = list(channel.threads)
+    try:
+        async for archived in channel.archived_threads(limit=50):
+            all_threads.append(archived)
+    except Exception:
+        pass
+
+    theme_lower = theme.lower()
+
+    # 1er passage : recherche dans les titres des posts
+    matches = [t for t in all_threads if theme_lower in t.name.lower()]
+
+    # 2e passage si rien trouvé : recherche dans le contenu des posts
+    if not matches:
+        for t in all_threads:
+            try:
+                starter = t.starter_message or await t.fetch_message(t.id)
+                if theme_lower in starter.content.lower():
+                    matches.append(t)
+            except Exception:
+                continue
+
+    if not matches:
+        return None
+
+    import random as _random
+    thread = _random.choice(matches)
+
+    try:
+        starter = thread.starter_message or await thread.fetch_message(thread.id)
+        content = sanitize_text(f"{thread.name}\n\n{starter.content}")
+    except Exception:
+        content = sanitize_text(thread.name)
+
+    new_questions = generate_questions_from_text(content, source_label=thread.name)
+    if not new_questions:
+        return None
+
+    save_questions_to_db(new_questions, source=thread.name)
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO processed_threads (thread_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            (str(thread.id),)
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    for q in new_questions:
+        if theme_lower in q.get("theme", "").lower() or theme_lower in q["q"].lower():
+            return q
+    return new_questions[0]
+
 @bot.tree.command(name="defi", description="Répond à une question quiz du serveur")
 @app_commands.describe(
     theme="Thème souhaité pour la question (optionnel, ex: stratégie, rôles, vocabulaire)",
@@ -901,20 +1019,33 @@ async def defi(interaction: discord.Interaction, theme: str = None, difficulte: 
         )
         return
 
+    await interaction.response.defer(ephemeral=True)
+
     difficulte_value = difficulte.value if difficulte else None
     question = get_random_question(theme=theme, difficulty=difficulte_value)
+
+    live_generated = False
+    if theme and (question is None or not question.get("matched_filter", True)):
+        live_question = await search_and_generate_from_forum(theme)
+        if live_question:
+            question = live_question
+            question["matched_filter"] = True
+            live_generated = True
+
     if question is None:
-        await interaction.response.send_message("⚠️ Aucune question disponible pour l'instant.", ephemeral=True)
+        await interaction.followup.send("⚠️ Aucune question disponible pour l'instant.")
         return
 
     fallback_note = ""
-    mismatch_reasons = []
-    if theme and theme.lower() not in question["theme"].lower():
-        mismatch_reasons.append(f'thème "{theme}"')
-    if difficulte_value and question["difficulty"] != difficulte_value:
-        mismatch_reasons.append(f'difficulté "{difficulte_value}"')
-    if mismatch_reasons:
-        fallback_note = f"\n\n*(Aucune question pour {' et '.join(mismatch_reasons)}, en voici une au hasard.)*"
+    if live_generated:
+        fallback_note = "\n\n*(Question générée à la volée depuis le forum \"savoir\" 🧠)*"
+    elif (theme or difficulte_value) and not question.get("matched_filter", True):
+        criteres = []
+        if theme:
+            criteres.append(f'thème "{theme}"')
+        if difficulte_value:
+            criteres.append(f'difficulté "{difficulte_value}"')
+        fallback_note = f"\n\n*(Aucune question pour {' et '.join(criteres)}, en voici une au hasard.)*"
 
     options_text = "\n".join(
         f"**{letter})** {text}" for letter, text in question["options"].items()
@@ -927,8 +1058,7 @@ async def defi(interaction: discord.Interaction, theme: str = None, difficulte: 
     )
 
     view = QuizView(question, interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    view.message = await interaction.original_response()
+    view.message = await interaction.followup.send(embed=embed, view=view)
 
 @bot.tree.command(name="streak", description="Affiche ton streak actuel et le prochain palier")
 async def streak(interaction: discord.Interaction):
@@ -989,7 +1119,18 @@ async def chat(interaction: discord.Interaction):
             )
         }
     ]
-    await interaction.response.send_message("💬 Mode conversation activé ! Écris-moi ce que tu veux, je te réponds. Tape `/stopchat` pour arrêter.")
+
+    past_messages = load_chat_memory(str(user_id))
+    if past_messages:
+        active_chats[user_id].extend(past_messages)
+        await interaction.response.send_message(
+            "💬 Mode conversation activé ! Je me souviens de notre dernière discussion. "
+            "Écris-moi ce que tu veux, je te réponds. Tape `/stopchat` pour arrêter."
+        )
+    else:
+        await interaction.response.send_message(
+            "💬 Mode conversation activé ! Écris-moi ce que tu veux, je te réponds. Tape `/stopchat` pour arrêter."
+        )
 
 @bot.tree.command(name="stopchat", description="Désactive le mode conversation avec l'IA")
 async def stopchat(interaction: discord.Interaction):
@@ -1106,6 +1247,10 @@ async def on_message(message):
                 reply = ask_groq(active_chats[user_id])
                 active_chats[user_id].append({"role": "assistant", "content": reply})
                 await message.channel.send(reply[:2000])  # limite Discord = 2000 caractères
+
+                # Sauvegarde la mémoire (hors system prompt) pour la prochaine session
+                non_system = [m for m in active_chats[user_id] if m["role"] != "system"]
+                save_chat_memory(str(user_id), non_system)
             except Exception as e:
                 await message.channel.send("⚠️ Erreur avec l'IA, réessaie dans un instant.")
                 print(f"Erreur Groq: {e}")
