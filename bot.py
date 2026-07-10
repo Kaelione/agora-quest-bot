@@ -106,10 +106,18 @@ def generate_questions_from_text(source_text, source_label=""):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": sanitize_text(source_text)[:4000]}
         ])
-        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        cleaned = raw.strip()
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+        # Si le modèle a ajouté du texte avant/après le JSON, on extrait juste le tableau
+        start = cleaned.find("[")
+        end = cleaned.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
         parsed = json.loads(cleaned)
     except Exception as e:
-        print(f"Erreur génération questions ({source_label}): {e}")
+        print(f"⚠️ Erreur génération questions ({source_label}): {e}")
+        print(f"⚠️ Réponse brute de l'IA : {locals().get('raw', 'N/A')[:500]}")
         return []
 
     results = []
