@@ -74,6 +74,49 @@ def save_chat_memory(user_id, messages):
     finally:
         release_conn(conn)
 
+SHARED_MEMORY_LIMIT = 40  # nombre d'entrées partagées conservées au total (toutes personnes confondues)
+
+def log_shared_memory(author_name, content):
+    """Enregistre ce qu'un joueur a dit, accessible ensuite à tous les autres joueurs."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO shared_memory (author_name, content) VALUES (%s, %s)",
+            (author_name, content)
+        )
+        # Garde uniquement les N entrées les plus récentes pour ne pas grossir indéfiniment
+        cur.execute("""
+            DELETE FROM shared_memory
+            WHERE id NOT IN (
+                SELECT id FROM shared_memory ORDER BY created_at DESC LIMIT %s
+            )
+        """, (SHARED_MEMORY_LIMIT,))
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+def get_shared_memory_context(limit=20):
+    """Retourne un texte listant ce que les joueurs ont dit récemment, avec leur nom."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT author_name, content FROM shared_memory ORDER BY created_at DESC LIMIT %s",
+            (limit,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if not rows:
+        return ""
+
+    lines = [f"[{author}] : {content}" for author, content in reversed(rows)]
+    return "\n".join(lines)
+
 DIFFICULTY_POINTS = {"facile": 1, "moyen": 2, "difficile": 3}
 
 # Mots/pseudos à ne jamais laisser passer dans les questions générées automatiquement
@@ -284,6 +327,16 @@ def init_db():
             CREATE TABLE IF NOT EXISTS chat_memory (
                 user_id TEXT PRIMARY KEY,
                 messages TEXT
+            )
+        """)
+
+        # Mémoire partagée : ce que chaque joueur dit au bot, accessible à tous les autres joueurs
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shared_memory (
+                id SERIAL PRIMARY KEY,
+                author_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
             )
         """)
 
@@ -1123,7 +1176,12 @@ async def chat(interaction: discord.Interaction):
                 "platement — trouve à la place une métaphore ou une image détournée qui fait passer le message "
                 "avec du style. Exemple : au lieu de traiter quelqu'un de con directement, dis "
                 "'vous êtes pas le lampadaire le plus lumineux du quartier'. "
-                "Réponds de façon naturelle, concise (pas de pavé), et dans la même langue que l'utilisateur."
+                "Réponds de façon naturelle, concise (pas de pavé), et dans la même langue que l'utilisateur. "
+                "Tu as accès à l'historique de vos échanges précédents dans cette conversation : appuie-toi "
+                "dessus seulement si c'est vraiment pertinent pour la question posée. Ne dis jamais "
+                "'on en a déjà parlé' ou une phrase similaire sauf si le sujet exact a vraiment été abordé "
+                "avant dans l'historique fourni — sinon réponds directement à la question sans faire semblant "
+                "de te souvenir de quelque chose qui n'a pas été dit."
             )
         }
     ]
@@ -1250,9 +1308,24 @@ async def on_message(message):
             return
 
         active_chats[user_id].append({"role": "user", "content": message.content})
+        log_shared_memory(message.author.display_name, message.content)
+
         async with message.channel.typing():
             try:
-                reply = ask_groq(active_chats[user_id])
+                shared_context = get_shared_memory_context(limit=20)
+                messages_to_send = [active_chats[user_id][0]]  # le system prompt
+                if shared_context:
+                    messages_to_send.append({
+                        "role": "system",
+                        "content": (
+                            "Voici des choses dites récemment par différents joueurs du serveur "
+                            "(avec leur pseudo). Tu peux t'en servir et les répéter à d'autres joueurs "
+                            "si c'est pertinent ou si on te le demande :\n" + shared_context
+                        )
+                    })
+                messages_to_send.extend(active_chats[user_id][1:])
+
+                reply = ask_groq(messages_to_send)
                 active_chats[user_id].append({"role": "assistant", "content": reply})
                 await message.channel.send(reply[:2000])  # limite Discord = 2000 caractères
 
