@@ -117,6 +117,37 @@ def get_shared_memory_context(limit=20):
     lines = [f"[{author}] : {content}" for author, content in reversed(rows)]
     return "\n".join(lines)
 
+def add_permanent_memory(author_name, content):
+    """Enregistre une info de façon permanente, jamais supprimée automatiquement."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO permanent_memory (author_name, content) VALUES (%s, %s)",
+            (author_name, content)
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+def get_permanent_memory_context():
+    """Retourne tout ce qui a été retenu de façon permanente, avec le nom de l'auteur."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT author_name, content FROM permanent_memory ORDER BY created_at ASC")
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        release_conn(conn)
+
+    if not rows:
+        return ""
+
+    lines = [f"[{author}] : {content}" for author, content in rows]
+    return "\n".join(lines)
+
 DIFFICULTY_POINTS = {"facile": 1, "moyen": 2, "difficile": 3}
 
 # Mots/pseudos à ne jamais laisser passer dans les questions générées automatiquement
@@ -333,6 +364,16 @@ def init_db():
         # Mémoire partagée : ce que chaque joueur dit au bot, accessible à tous les autres joueurs
         cur.execute("""
             CREATE TABLE IF NOT EXISTS shared_memory (
+                id SERIAL PRIMARY KEY,
+                author_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # Mémoire permanente : jamais supprimée automatiquement, contrairement à shared_memory
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS permanent_memory (
                 id SERIAL PRIMARY KEY,
                 author_name TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -1313,7 +1354,18 @@ async def on_message(message):
         async with message.channel.typing():
             try:
                 shared_context = get_shared_memory_context(limit=20)
+                permanent_context = get_permanent_memory_context()
                 messages_to_send = [active_chats[user_id][0]]  # le system prompt
+
+                if permanent_context:
+                    messages_to_send.append({
+                        "role": "system",
+                        "content": (
+                            "Voici des infos que des joueurs ont demandé de retenir de façon permanente "
+                            "(avec leur pseudo). Considère-les comme des faits fiables et durables, "
+                            "utilise-les si pertinent :\n" + permanent_context
+                        )
+                    })
                 if shared_context:
                     messages_to_send.append({
                         "role": "system",
@@ -1591,6 +1643,14 @@ async def themes(interaction: discord.Interaction):
     await interaction.response.send_message(
         "📚 **Thèmes disponibles** (utilise `/defi theme:...`) :\n" + "\n".join(lines),
         ephemeral=True
+    )
+
+@bot.tree.command(name="retenir", description="Demande au bot de retenir une info pour toujours")
+@app_commands.describe(texte="Ce que tu veux que le bot retienne définitivement")
+async def retenir(interaction: discord.Interaction, texte: str):
+    add_permanent_memory(interaction.user.display_name, texte)
+    await interaction.response.send_message(
+        f"🧠 Retenu pour toujours : *\"{texte}\"*", ephemeral=True
     )
 
 bot.run(os.getenv("TOKEN"))
