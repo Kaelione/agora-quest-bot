@@ -15,7 +15,7 @@ import requests
 # IA (Groq - gratuit, sans carte bancaire)
 # =========================================================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 def ask_groq(messages):
     response = requests.post(
